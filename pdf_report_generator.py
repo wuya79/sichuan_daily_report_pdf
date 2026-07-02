@@ -161,7 +161,7 @@ def build_system_prompt():
 【格式硬性要求】
 1. 输出完整HTML（<!DOCTYPE html>到</html>），不要Markdown代码块
 2. 必须包含：封面(.cover) + 目录(.toc-page) + {section_count}个section
-3. 总表格数必须达到{table_count}张，每张表必须有caption(data-label="表X")
+3. 总表格数必须达到{table_count}张，每张表必须有<caption data-label="表X">标题</caption>（显示在表格上方）
 4. 每张表格必须有thead（border-top:2px solid #333, border-bottom:1px solid #333）和tbody（border-bottom:2px solid #333）
 5. 每个section结尾必须有<div class="analysis-box">或<div class="info-box">或<div class="warning-box">
 6. 图表引用格式：<figure><img src="charts/xxx.png"><figcaption data-label="图X">标题</figcaption></figure>
@@ -257,6 +257,49 @@ def fix_short_analysis_boxes(html: str, report_text: str, api_key: str) -> str:
     return html
 
 
+def move_captions_below_tables(html: str) -> str:
+    """
+    将HTML中所有 <caption> 从 <table> 前方移动到 </table> 后方。
+    同时将 data-label 属性值（如"表1"）直接嵌入caption文本中，
+    避免weasyprint渲染table外caption时::before伪元素失效。
+
+    Kimi输出格式:
+        <table>
+        <caption data-label="表1">核心指标一览</caption>
+        ...表内容...
+        </table>
+    处理后:
+        <table>
+        ...表内容...
+        </table>
+        <div class="table-caption">表1  核心指标一览</div>
+    """
+    pattern = re.compile(
+        r'(<table[^>]*>)\s*'
+        r'<caption[^>]*data-label="([^"]*)"[^>]*>([\s\S]*?)</caption>\s*'
+        r'(.*?</table>)',
+        re.DOTALL
+    )
+
+    def replacer(match):
+        table_open = match.group(1)
+        label = match.group(2)     # "表1"
+        title = match.group(3)     # "核心指标一览"
+        rest = match.group(4)      # 表格内容 + </table>
+        # 拼接标题文本：保持caption::before的样式效果
+        caption_text = f'{label}  {title.strip()}'
+        # 把 caption 移到 </table> 之后，用div替代caption（避免table外渲染异常）
+        if rest.rstrip().endswith('</table>'):
+            idx = rest.rfind('</table>')
+            table_body = rest[:idx]
+            table_close = rest[idx:]
+            return f'{table_open}{table_body}\n{table_close}\n<div class="table-caption">{caption_text}</div>'
+        else:
+            return match.group(0)
+
+    return pattern.sub(replacer, html)
+
+
 def _get_section_context(html: str, box_marker: str) -> str:
     """找到分析框所在的section上下文。"""
     # 从box位置往前找最近的h1/h2标题
@@ -333,6 +376,7 @@ def generate_html_single_round(report_text: str, charts_dir: str, api_key: str) 
 
     system_prompt = build_system_prompt()
 
+    today_str = datetime.now().strftime("%Y年%m月%d日")
     user_message = f"""请根据以下四川电力交易日报数据，生成完整的HTML报告。
 
 【硬性要求 - 必须遵守】
@@ -340,11 +384,12 @@ def generate_html_single_round(report_text: str, charts_dir: str, api_key: str) 
 2. 必须包含封面页（.cover）、目录页（.toc-page）、全部10个section
 3. 每个section必须包含2-4张数据表格，每张表格必须有6-12行数据
 4. 总表格数量必须达到25张以上
-5. 每张表格必须有caption(data-label="表X")编号
+5. 每张表格必须有<caption data-label="表X">标题</caption>（显示在表格上方）
 6. 每个section结尾必须有.analysis-box或.info-box进行分析
 7. 趋势仪表盘section必须引用图表：<img src="charts/xxx.png">
 8. 所有单元格必须填入实际数据，不能留空或写"--"
 9. 每个分析框内容不少于200字（约5-8句），结合表格数据展开分析趋势原因、数据变化原因和市场影响，遵循四川电力市场规则（水期划分、边际定价机制、供需关系），不得臆想
+10. 【重要】封面页的报告周期必须写为"{today_str}"，不要使用其他日期
 
 【已生成的图表文件 - 在HTML中引用】
 {chart_refs}
@@ -419,6 +464,12 @@ def generate_pdf(api_key: str) -> dict:
         write_file(str(html_file), html)
         log.info(f"  HTML: {html_file} ({len(html)}字符)")
 
+        # 3.3 后处理：将caption从表格前移动到表格后（确保表X标签在表格下方渲染）
+        log.info("Step 3.3: 移动captions到表格下方...")
+        html = move_captions_below_tables(html)
+        write_file(str(html_file), html)
+        log.info(f"  Captions移动完成: HTML {len(html)}字符")
+
         # 3.5 后处理：补写短分析框（不超过200字的补成200-400字）
         log.info("Step 3.5: 补写短分析框...")
         try:
@@ -459,7 +510,7 @@ def generate_pdf(api_key: str) -> dict:
         result.update({
             "success": True,
             "pdf_path": str(nginx_dated),
-            "pdf_url": f"{NGINX_BASE}/pdf/{latest_name}",
+            "pdf_url": f"{NGINX_BASE}/pdf/{dated_name}",
             "html_path": str(html_file),
             "date": date_str,
             "tables": html.count("<table>"),
@@ -469,8 +520,8 @@ def generate_pdf(api_key: str) -> dict:
         # 清理临时job目录
         if job_dir and job_dir.exists():
             import shutil as sh
-            sh.rmtree(str(job_dir))
-            log.info(f"  清理临时目录: {job_dir.name}")
+            # sh.rmtree(str(job_dir))  # 调试期暂不删除
+            log.info(f"  跳过清理: {job_dir.name} (调试模式)")
             job_dir = None
 
     except Exception as e:
@@ -498,12 +549,14 @@ def main():
     if not TEMPLATE_PATH.exists():
         log.warning(f"  ⚠ 模板文件不存在: {TEMPLATE_PATH}（system prompt可能缺少模板参考）")
 
-    # 读取kimi api key：优先KIMI_API_KEY环境变量，若没有则从.key文件读取
+    # 统一Key加载：优先环境变量，再读key_loader
     api_key = os.environ.get("KIMI_API_KEY")
     if not api_key:
-        key_file = SCRIPT_DIR / ".kimi_key"
-        if key_file.exists():
-            api_key = key_file.read_text().strip().strip("'\"")
+        try:
+            from key_loader import get as _get_key
+            api_key = _get_key("KIMI_API_KEY")
+        except ImportError:
+            pass
 
     if not api_key:
         log.error("错误: 未找到KIMI_API_KEY环境变量。请在 ~/.hermes/.env 中设置 KIMI_API_KEY=sk-...")
