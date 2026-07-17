@@ -35,10 +35,14 @@ SCRIPT_DIR = Path(__file__).parent
 OUTPUT_DIR = Path("/tmp/hermes_pdf_reports")
 LOG_FILE = os.path.expanduser("~/.hermes/logs/pdf_report_generator.log")
 
-DAILY_URL = f"{NGINX_BASE}/daily_latest.txt"
+DAILY_TXT = Path(NGINX_DIR) / "daily_latest.txt"  # 本地读，不依赖nginx
 
-KIMI_BASE_URL = "https://api.moonshot.cn/v1"
-KIMI_MODEL = "moonshot-v1-128k"
+KIMI_BASE_URL_OPEN = "https://api.moonshot.cn/v1"
+KIMI_MODEL_OPEN = "moonshot-v1-128k"
+
+# Kimi Code Plan（备用，限流/超时时切换）
+KIMI_BASE_URL_CODE = "https://api.kimi.com/coding/v1"
+KIMI_MODEL_CODE = "moonshot-v1-128k"
 
 # ─── Skill Assets ───────────────────────────────────────────────
 SKILL_DIR = Path.home() / ".hermes" / "skills" / "document-processing" / "scu-power-report"
@@ -63,29 +67,62 @@ log = logging.getLogger("pdf_report")
 
 # ─── 工具函数 ────────────────────────────────────────────────────
 
-def kimi_call(api_key: str, system_prompt: str, user_message: str,
-              timeout: int = 600, max_tokens: int = 100000) -> str:
-    """调用Kimi API，带超时保护。使用httpx超时控制。"""
+def _do_openai_call(api_key: str, base_url: str, model: str,
+                    messages: list, temperature: float,
+                    max_tokens: int, timeout: int) -> str:
+    """单次 OpenAI 兼容 API 调用，不处理 fallback。"""
     import openai
     import httpx
-
     http_client = httpx.Client(timeout=httpx.Timeout(timeout, connect=10, read=timeout, write=10))
-    client = openai.OpenAI(api_key=api_key, base_url=KIMI_BASE_URL, http_client=http_client, max_retries=0)
-
+    client = openai.OpenAI(api_key=api_key, base_url=base_url, http_client=http_client, max_retries=0)
     resp = client.chat.completions.create(
-        model=KIMI_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0.2,
-        max_tokens=max_tokens,
+        model=model, messages=messages,
+        temperature=temperature, max_tokens=max_tokens,
     )
     return resp.choices[0].message.content
 
 
+def kimi_call_with_fallback(api_key_open: str, api_key_code: str,
+                             system_prompt: str, user_message: str,
+                             timeout: int = 600, max_tokens: int = 100000) -> str:
+    """优先 Kimi 开放平台。触发 429/5xx/超时 → 自动切 Kimi Code Plan。"""
+    import openai
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+    # 尝试主平台（开放平台，temperature=0.2）
+    try:
+        log.info("[PRIMARY] Kimi开放平台...")
+        result = _do_openai_call(api_key_open, KIMI_BASE_URL_OPEN, KIMI_MODEL_OPEN,
+                                 messages, temperature=0.2, max_tokens=max_tokens, timeout=timeout)
+        log.info("[PRIMARY] ✅")
+        return result
+    except (openai.RateLimitError, openai.InternalServerError,
+            openai.APITimeoutError, openai.APIConnectionError,
+            openai.APIStatusError) as e:
+        log.warning(f"[PRIMARY] ⚠️ {type(e).__name__}，切换到 Code Plan...")
+        if not api_key_code:
+            raise RuntimeError(f"开放平台{type(e).__name__}，但 Code Plan key 未配置，无法切换") from e
+    # 401/400 不切换，直接向上抛
+
+    # 备用平台（Code Plan，temperature=1）
+    log.info("[FALLBACK] Kimi Code Plan...")
+    result = _do_openai_call(api_key_code, KIMI_BASE_URL_CODE, KIMI_MODEL_CODE,
+                             messages, temperature=1, max_tokens=max_tokens, timeout=timeout)
+    log.info("[FALLBACK] ✅")
+    return result
+
+
 def extract_html(raw: str) -> str:
     """从Kimi返回内容中提取HTML。带fallback，永不raise。"""
+    # 检测nginx错误页面
+    if "<title>50" in raw and "Gateway" in raw:
+        raise RuntimeError(f"API返回网关错误: {raw[:200]}")
+    if "<title>40" in raw and "Error" in raw:
+        raise RuntimeError(f"API返回HTTP错误: {raw[:200]}")
     if "```html" in raw:
         return raw.split("```html")[1].split("```")[0].strip()
     if "```" in raw and ("<!DOCTYPE" in raw or "<html" in raw):
@@ -98,20 +135,6 @@ def extract_html(raw: str) -> str:
     log.warning("  extract_html无法识别标准HTML，使用原始返回内容")
     return raw.strip()
 
-
-def fetch_report_text(url: str, timeout: int = 15) -> str:
-    """从URL拉取报告文本。"""
-    import urllib.request
-
-    req = urllib.request.Request(url, headers={"User-Agent": "PDF-Generator/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = resp.read()
-        for enc in ["utf-8", "gbk", "gb2312"]:
-            try:
-                return data.decode(enc)
-            except UnicodeDecodeError:
-                continue
-        return data.decode("utf-8", errors="replace")
 
 
 def write_file(path: str, content: str):
@@ -177,16 +200,13 @@ def build_system_prompt():
 
 # ─── 后处理：补写短分析框 ──────────────────────────────────────
 
-def fix_short_analysis_boxes(html: str, report_text: str, api_key: str) -> str:
+def fix_short_analysis_boxes(html: str, report_text: str, api_key_open: str, api_key_code: str) -> str:
     """
     检测HTML中所有analysis-box/info-box/warning-box的内容长度，
     对不足200字的框，单独调用Kimi补写成200-400字的详细分析。
     直接在HTML中替换原框内容。
     返回补写后的完整HTML。
     """
-    import openai
-    import httpx
-
     boxes = re.findall(
         r'(<div class="(analysis-box|info-box|warning-box)">)(.*?)(</div>)',
         html, re.DOTALL
@@ -234,7 +254,7 @@ def fix_short_analysis_boxes(html: str, report_text: str, api_key: str) -> str:
         old_text = re.sub(r'<[^>]+>', '', old_inner).strip()
 
         # 调用Kimi补写
-        new_analysis = _call_kimi_for_analysis(api_key, report_text, section_hint, old_text)
+        new_analysis = _call_kimi_for_analysis(api_key_open, api_key_code, report_text, section_hint, old_text)
         if not new_analysis:
             continue
 
@@ -318,10 +338,8 @@ def _get_section_context(html: str, box_marker: str) -> str:
     return ""
 
 
-def _call_kimi_for_analysis(api_key: str, report_text: str, section_hint: str, old_text: str) -> str:
-    """调用Kimi补写单个分析框。短调用，timeout=60s，max_tokens=2000。"""
-    import openai
-    import httpx
+def _call_kimi_for_analysis(api_key_open: str, api_key_code: str, report_text: str, section_hint: str, old_text: str) -> str:
+    """调用Kimi补写单个分析框。短调用，timeout=60s，max_tokens=2000。支持双key自动切换。"""
 
     if not section_hint:
         section_hint = "电力交易分析"
@@ -344,23 +362,30 @@ def _call_kimi_for_analysis(api_key: str, report_text: str, section_hint: str, o
 - 用<p>标签包裹段落
 - 只为输出分析正文，不要多余的说明"""
 
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+
     try:
-        http_client = httpx.Client(timeout=httpx.Timeout(60, connect=10, read=60, write=10))
-        client = openai.OpenAI(api_key=api_key, base_url=KIMI_BASE_URL, http_client=http_client, max_retries=0)
-        resp = client.chat.completions.create(
-            model=KIMI_MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            temperature=0.3,
-            max_tokens=2000,
-        )
-        text = resp.choices[0].message.content.strip()
-        # 如果返回了markdown代码块，提取
-        if "```" in text:
-            text = text.split("```")[1].split("```")[0].strip() if "```" in text else text
-        return text
+        import openai
+        # 主平台
+        try:
+            text = _do_openai_call(api_key_open, KIMI_BASE_URL_OPEN, KIMI_MODEL_OPEN,
+                                   messages, temperature=0.3, max_tokens=2000, timeout=60)
+            text = text.strip()
+            if "```" in text:
+                text = text.split("```")[1].split("```")[0].strip() if "```" in text else text
+            return text
+        except (openai.RateLimitError, openai.InternalServerError,
+                openai.APITimeoutError, openai.APIConnectionError,
+                openai.APIStatusError):
+            text = _do_openai_call(api_key_code, KIMI_BASE_URL_CODE, KIMI_MODEL_CODE,
+                                   messages, temperature=1, max_tokens=2000, timeout=60)
+            text = text.strip()
+            if "```" in text:
+                text = text.split("```")[1].split("```")[0].strip() if "```" in text else text
+            return text
     except Exception as e:
         log.warning(f"    补写失败（跳过）: {e}")
         return ""
@@ -369,7 +394,7 @@ def _call_kimi_for_analysis(api_key: str, report_text: str, section_hint: str, o
 
 # ─── 生成HTML（单轮） ─────────────────────────────────────────────
 
-def generate_html_single_round(report_text: str, charts_dir: str, api_key: str) -> str:
+def generate_html_single_round(report_text: str, charts_dir: str, api_key_open: str, api_key_code: str) -> str:
     """单轮调用Kimi生成完整HTML。"""
     chart_files = sorted(Path(charts_dir).glob("*.png")) if os.path.exists(charts_dir) else []
     chart_refs = "\n".join([f'<img src="charts/{f.name}">' for f in chart_files]) if chart_files else ""
@@ -400,7 +425,7 @@ def generate_html_single_round(report_text: str, charts_dir: str, api_key: str) 
 请直接输出完整HTML代码。"""
 
     log.info("调用Kimi API生成HTML...")
-    raw = kimi_call(api_key, system_prompt, user_message, timeout=600)
+    raw = kimi_call_with_fallback(api_key_open, api_key_code, system_prompt, user_message, timeout=600)
     html = extract_html(raw)
     log.info(f"HTML生成完成: {len(html)}字符")
     return html
@@ -408,7 +433,7 @@ def generate_html_single_round(report_text: str, charts_dir: str, api_key: str) 
 
 # ─── 主流程 ─────────────────────────────────────────────────────
 
-def generate_pdf(api_key: str) -> dict:
+def generate_pdf(api_key_open: str, api_key_code: str) -> dict:
     """
     生成日报PDF完整流程。
     返回: {"success": bool, "pdf_path": str, "html_path": str, "error": str, ...}
@@ -425,11 +450,11 @@ def generate_pdf(api_key: str) -> dict:
         charts_dir.mkdir(exist_ok=True)
 
         # 1. 拉取报告文本
-        log.info("Step 1: 拉取日报报告...")
-        report_text = fetch_report_text(DAILY_URL)
+        log.info("Step 1: 读取日报报告（本地文件）...")
+        report_text = DAILY_TXT.read_text(encoding="utf-8")
         report_file = job_dir / "daily_report.txt"
         write_file(str(report_file), report_text)
-        log.info(f"  拉取完成: {len(report_text)}字符")
+        log.info(f"  读取完成: {len(report_text)}字符")
 
         # 提取日期
         date_match = re.search(r"(\d{4}-\d{2}-\d{2})", report_text)
@@ -451,7 +476,7 @@ def generate_pdf(api_key: str) -> dict:
         # 3. 生成HTML（单轮Kimi）
         log.info("Step 3: 生成HTML...")
         try:
-            html = generate_html_single_round(report_text, str(charts_dir), api_key)
+            html = generate_html_single_round(report_text, str(charts_dir), api_key_open, api_key_code)
         except Exception as e:
             raise RuntimeError(f"HTML生成失败: {e}") from e
 
@@ -473,7 +498,7 @@ def generate_pdf(api_key: str) -> dict:
         # 3.5 后处理：补写短分析框（不超过200字的补成200-400字）
         log.info("Step 3.5: 补写短分析框...")
         try:
-            html = fix_short_analysis_boxes(html, report_text, api_key)
+            html = fix_short_analysis_boxes(html, report_text, api_key_open, api_key_code)
             write_file(str(html_file), html)
             log.info(f"  补写完成: HTML {len(html)}字符")
         except Exception as e:
@@ -520,9 +545,11 @@ def generate_pdf(api_key: str) -> dict:
         # 清理临时job目录
         if job_dir and job_dir.exists():
             import shutil as sh
-            # sh.rmtree(str(job_dir))  # 调试期暂不删除
-            log.info(f"  跳过清理: {job_dir.name} (调试模式)")
-            job_dir = None
+            try:
+                sh.rmtree(str(job_dir))
+                job_dir = None
+            except Exception as e:
+                log.warning(f"  临时目录清理失败（不影响结果）: {e}")
 
     except Exception as e:
         log.error(f"✗ 生成失败: {e}")
@@ -550,22 +577,29 @@ def main():
         log.warning(f"  ⚠ 模板文件不存在: {TEMPLATE_PATH}（system prompt可能缺少模板参考）")
 
     # 统一Key加载：优先环境变量，再读key_loader
-    api_key = os.environ.get("KIMI_API_KEY")
-    if not api_key:
+    api_key_open = os.environ.get("KIMI_API_KEY_OPEN")
+    api_key_code = os.environ.get("KIMI_API_KEY")
+    if not api_key_open or not api_key_code:
         try:
             from key_loader import get as _get_key
-            api_key = _get_key("KIMI_API_KEY")
+            if not api_key_open:
+                api_key_open = _get_key("KIMI_API_KEY_OPEN")
+            if not api_key_code:
+                api_key_code = _get_key("KIMI_API_KEY")
         except ImportError:
             pass
 
-    if not api_key:
-        log.error("错误: 未找到KIMI_API_KEY环境变量。请在 ~/.hermes/.env 中设置 KIMI_API_KEY=sk-...")
+    if not api_key_open:
+        log.error("错误: 未找到KIMI_API_KEY_OPEN。请在 ~/.hermes/.env 中设置 KIMI_API_KEY_OPEN=sk-...")
+        sys.exit(1)
+    if not api_key_code:
+        log.error("错误: 未找到KIMI_API_KEY（Code Plan）。请在 ~/.hermes/.env 中设置 KIMI_API_KEY=sk-kimi-...")
         sys.exit(1)
 
     log.info("=== 开始生成日报PDF ===")
     start = time.time()
 
-    result = generate_pdf(api_key)
+    result = generate_pdf(api_key_open, api_key_code)
 
     elapsed = time.time() - start
     if result["success"]:
