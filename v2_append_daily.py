@@ -71,8 +71,10 @@ if _missing_dates:
             if any(v is not None for v in _da_list) and any(v is not None for v in _rt_list):
                 ph.append({"date": _d, "da": _da_list, "rt": _rt_list})
                 price_by_date[_d] = ph[-1]
-                with open(PH, 'w') as _fh:
+                _tmp = PH + '.tmp'
+                with open(_tmp, 'w') as _fh:
                     json.dump(ph, _fh)
+                os.replace(_tmp, PH)
                 print(f'  ✅ {_d}')
             else:
                 print(f'  ⚠ {_d}: 数据无效')
