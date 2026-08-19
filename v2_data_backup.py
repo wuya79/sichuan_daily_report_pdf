@@ -29,11 +29,7 @@ FILES = {
     "/home/ubuntu/.hermes/metrics/v2_daily.jsonl": "v2/v2_daily_metrics.jsonl",
     "/home/ubuntu/sichuan_hydro_price/.reservoir_history.json": "sichuan/reservoir_history.json",
     "/home/ubuntu/sichuan_hydro_price/.monthly_trade_archive.json": "sichuan/monthly_trade_archive.json",
-    "/home/ubuntu/.hermes/config.yaml": "hermes/config.yaml",
-    "/home/ubuntu/.hermes/.env": "hermes/env.txt",
     "/home/ubuntu/.hermes/cron/jobs.json": "hermes/cron_jobs.json",
-    "/home/ubuntu/.hermes/memories/MEMORY.md": "hermes/memories/MEMORY.md",
-    "/home/ubuntu/.hermes/memories/USER.md": "hermes/memories/USER.md",
 }
 
 # 目录: 源目录 → 备份相对目录 (rsync增量/整树复制, 排除嵌套.git和锁文件)
