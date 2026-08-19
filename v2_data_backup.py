@@ -131,11 +131,27 @@ def main():
             local[p[3]] = (p[2], p[0])
     changed = [p for p, (s, m) in local.items()
                if p not in remote or remote[p][0] != s]
-    for p in changed:
-        raw = subprocess.run(f"git cat-file -p {local[p][0]}",
+    # 断点续传: 已成功上传的blob记录在.state, 重跑时跳过(GitHub API不稳定时的收敛机制)
+    state_path = os.path.join(CWD, ".upload_state.json")
+    state = {}
+    if os.path.exists(state_path):
+        try:
+            state = json.load(open(state_path))
+        except Exception:
+            state = {}
+    for i, p in enumerate(changed):
+        sha = local[p][0]
+        if state.get(p) == sha:
+            continue  # 已上传过, 跳过
+        raw = subprocess.run(f"git cat-file -p {sha}",
                              capture_output=True, shell=True, cwd=CWD).stdout
         api("POST", "git/blobs", {"content": base64.b64encode(raw).decode(),
                                   "encoding": "base64"})
+        state[p] = sha
+        with open(state_path, "w") as _sf:
+            json.dump(state, _sf)
+        if (i + 1) % 50 == 0:
+            print(f"  上传进度 {i + 1}/{len(changed)}")
     entries = [{"path": p, "mode": m, "type": "blob", "sha": s}
                for p, (s, m) in remote.items() if p not in changed]
     entries += [{"path": p, "mode": m, "type": "blob", "sha": s}
@@ -150,6 +166,8 @@ def main():
         "author": {"name": an, "email": ae, "date": ad},
         "committer": {"name": an, "email": ae, "date": ad}})["sha"]
     r = api("PATCH", f"git/refs/heads/{BRANCH}", {"sha": nc, "force": True})
+    if os.path.exists(state_path):
+        os.remove(state_path)  # 本轮完整成功, 清空断点状态
     print(f"✅ 备份已推送 {len(changed)}文件 HEAD={r['object']['sha'][:8]}")
 
 
