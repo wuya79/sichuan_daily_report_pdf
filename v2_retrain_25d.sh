@@ -1,6 +1,6 @@
 #!/bin/bash
 # v2_retrain_25d.sh — 每日08:00 cron
-# 短窗口(35天, P2)重训XGBoost, 保存到 models/*_25d.json
+# 短窗口(35天, P2)重训XGBoost, 保存到 models/*_35d.json + 校准写入v2_config.calibration_35d
 # 互斥: 与全量重训共用锁, 防并发写特征表
 # timeout 1800: 单日最坏~600s(API全重试), 3天累积~1800s, 留足余量防"永远追不上"
 exec 9>/tmp/v2_retrain.lock
