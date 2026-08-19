@@ -6,7 +6,7 @@
       对照运行日实际价差，计算PnL/准确率，追加到 hourly_decisions.csv
       已存在的日期跳过（幂等）。
 """
-import json, pandas as pd, os, re
+import json, pandas as pd, os, re, shutil
 from datetime import date, timedelta
 
 HDF = '/home/ubuntu/v2_cq_strategy/reports/hourly_decisions.csv'
@@ -38,7 +38,7 @@ def _aggregate_to_hourly(raw):
     hh = {}
     for k, v in raw.items():
         minute = int(k[:2]) * 60 + int(k[2:])
-        h = min(minute // 60, 23)
+        h = max(0, (minute - 1) // 60)
         hh.setdefault(h, []).append(v)
     return [sum(hh.get(h, [0])) / len(hh[h]) if h in hh else None for h in range(24)]
 
@@ -111,6 +111,9 @@ for fname in sorted(os.listdir(ARCHIVE_DIR)):
         continue
     
     # 匹配计算
+    # regime标签(顶层, 预测日当时的市场状态; 2026-08-19审计修复: 原硬编码空字符串)
+    _rg = v2.get('regime') or {}
+    _regime_label = _rg.get('label', '') if isinstance(_rg, dict) else str(_rg)
     rows = []
     for h in v2.get('hours', []):
         hh = int(h['hour'][:2])
@@ -142,7 +145,7 @@ for fname in sorted(os.listdir(ARCHIVE_DIR)):
             'pred_spread': h.get('pred_spread'),
             'position_multiplier': h.get('position_multiplier', 1.0),
             'pnl_pos_engine': pnl * h.get('position_multiplier', 1.0) if abs(spread) > SPREAD_T else 0,
-            'regime': '', 'segment': h.get('hour_type', ''),
+            'regime': _regime_label, 'segment': h.get('hour_type', ''),
         })
     
     if not rows:
@@ -154,7 +157,12 @@ for fname in sorted(os.listdir(ARCHIVE_DIR)):
         combined = pd.concat([old_df, new_df], ignore_index=True)
     else:
         combined = new_df
-    combined.to_csv(HDF, index=False)
+    # 原子写(临时文件+replace), 防日报并发读半截; 写前备份防写坏不可恢复
+    if os.path.exists(HDF):
+        shutil.copy2(HDF, HDF + '.bak')
+    _h_tmp = HDF + '.tmp'
+    combined.to_csv(_h_tmp, index=False)
+    os.replace(_h_tmp, HDF)
     
     # 更新内存状态（后续日期去重）
     old_df = combined

@@ -667,7 +667,7 @@ def main():
 
         # OSS 上传（下游系统交付通道）
         if result.get("pdf_path") and result.get("date"):
-            oss_key = f"sichaun-daily-report/daily_{result['date']}.pdf"
+            oss_key = f"sichuan-daily-report/daily_{result['date']}.pdf"
             oss_result = upload_to_oss(result["pdf_path"], oss_key)
             result["oss_ok"] = oss_result["ok"]
             if oss_result["ok"]:
