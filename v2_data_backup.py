@@ -83,7 +83,8 @@ def main():
         dst = os.path.join(CWD, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         if RSYNC:
-            subprocess.run(["rsync", "-a", "--delete"] + RSYNC_EXCLUDES
+            # 注意: 不带--delete, 备份永不删除任何文件(源删了副本也保留=备份的意义)
+            subprocess.run(["rsync", "-a"] + RSYNC_EXCLUDES
                            + [src.rstrip("/") + "/", dst + "/"],
                            check=False)
         else:
