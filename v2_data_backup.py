@@ -131,7 +131,7 @@ def main():
             local[p[3]] = (p[2], p[0])
     changed = [p for p, (s, m) in local.items()
                if p not in remote or remote[p][0] != s]
-    # 断点续传: 已成功上传的blob记录在.state, 重跑时跳过(GitHub API不稳定时的收敛机制)
+    # 断点续传+并发: 已成功上传的blob记录在.state, 重跑跳过; 8线程并发(串行1s/个太慢)
     state_path = os.path.join(CWD, ".upload_state.json")
     state = {}
     if os.path.exists(state_path):
@@ -139,19 +139,35 @@ def main():
             state = json.load(open(state_path))
         except Exception:
             state = {}
-    for i, p in enumerate(changed):
+    import threading
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+    _lock = threading.Lock()
+    _done = [0]
+    _t0 = _time.time()
+
+    def _up(p):
         sha = local[p][0]
-        if state.get(p) == sha:
-            continue  # 已上传过, 跳过
+        with _lock:
+            if state.get(p) == sha:
+                return
         raw = subprocess.run(f"git cat-file -p {sha}",
                              capture_output=True, shell=True, cwd=CWD).stdout
         api("POST", "git/blobs", {"content": base64.b64encode(raw).decode(),
                                   "encoding": "base64"})
-        state[p] = sha
-        with open(state_path, "w") as _sf:
-            json.dump(state, _sf)
-        if (i + 1) % 50 == 0:
-            print(f"  上传进度 {i + 1}/{len(changed)}")
+        with _lock:
+            state[p] = sha
+            with open(state_path, "w") as _sf:
+                json.dump(state, _sf)
+            _done[0] += 1
+            if _done[0] % 100 == 0:
+                print(f"  上传进度 {_done[0]}/{len(changed)} "
+                      f"(耗时{_time.time() - _t0:.0f}s)", flush=True)
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        list(ex.map(_up, changed))
+    print(f"  blob上传完成 {_done[0]}/{len(changed)} "
+          f"耗时{_time.time() - _t0:.0f}s", flush=True)
     entries = [{"path": p, "mode": m, "type": "blob", "sha": s}
                for p, (s, m) in remote.items() if p not in changed]
     entries += [{"path": p, "mode": m, "type": "blob", "sha": s}
