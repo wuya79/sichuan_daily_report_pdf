@@ -40,7 +40,8 @@ DIRS = {
     "/home/ubuntu/sichuan_weather_brief": "projects/sichuan_weather_brief",
 }
 RSYNC_EXCLUDES = ["--exclude=.git/", "--exclude=*.lock", "--exclude=__pycache__/",
-                  "--exclude=*.pyc", "--exclude=cache/", "--exclude=*.png"]
+                  "--exclude=*.pyc", "--exclude=cache/", "--exclude=*.png",
+                  "--exclude=.curator_backups/"]
 
 
 def sh(cmd):
@@ -48,20 +49,34 @@ def sh(cmd):
                           shell=True, cwd=CWD).stdout.strip()
 
 
-def api(method, path, data=None):
+def api(method, path, data=None, tries=3):
+    import time
     tok = open(os.path.expanduser("~/.hermes/keys/GITHUB_TOKEN")).read().strip()
     url = f"https://api.github.com/repos/{REPO}/{path}"
     body = json.dumps(data).encode() if data is not None else None
-    req = urllib.request.Request(
-        url, data=body, method=method,
-        headers={"Authorization": f"token {tok}",
-                 "Content-Type": "application/json",
-                 "User-Agent": "hermes-push/1.0"})
-    try:
-        resp = urllib.request.urlopen(req, timeout=120)
-        return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}: {e.read().decode()[:200]}")
+    last = None
+    for i in range(tries):
+        req = urllib.request.Request(
+            url, data=body, method=method,
+            headers={"Authorization": f"token {tok}",
+                     "Content-Type": "application/json",
+                     "User-Agent": "hermes-push/1.0"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=120)
+            return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            last = RuntimeError(f"HTTP {e.code}: {e.read().decode()[:200]}")
+            if e.code >= 500 and i < tries - 1:
+                time.sleep(5 * (i + 1))
+                continue
+            raise last
+        except Exception as e:
+            last = e
+            if i < tries - 1:
+                time.sleep(5 * (i + 1))
+                continue
+            raise last
+    raise last if last is not None else RuntimeError("unknown")
 
 
 def main():
@@ -91,22 +106,24 @@ def main():
             subprocess.run(["cp", "-r", src.rstrip("/") + "/.", dst],
                            check=False)
 
-    # 3. commit (无变化则静默)
+    # 3. commit (本地快照, 无变化不commit)
     subprocess.run("git add -A", shell=True, cwd=CWD, check=True)
     diff = sh("git diff --cached --stat")
-    if not diff:
-        print("无变化, 跳过")
-        return
-    from datetime import datetime
-    msg = f"全系统数据快照 {datetime.now():%Y-%m-%d}"
-    subprocess.run(f"git commit -m '{msg}'", shell=True, cwd=CWD, check=True)
+    if diff:
+        from datetime import datetime
+        msg = f"全系统数据快照 {datetime.now():%Y-%m-%d}"
+        subprocess.run(f"git commit -m '{msg}'", shell=True, cwd=CWD, check=True)
 
-    # 4. API增量推送
+    # 4. 推送本地HEAD树到远端(对比远端树, 只传缺的blob; 相同则跳过)
+    #    不依赖"本次是否新commit"——上次push失败后也能靠这步补推
     base = api("GET", f"git/refs/heads/{BRANCH}")["object"]["sha"]
     bt = api("GET", f"git/commits/{base}")["tree"]["sha"]
+    lt = sh("git rev-parse HEAD^{tree}")
+    if bt == lt:
+        print("远端已是最新, 跳过")
+        return
     rt = api("GET", f"git/trees/{bt}?recursive=1")["tree"]
     remote = {i["path"]: (i["sha"], i["mode"]) for i in rt if i["type"] == "blob"}
-    lt = sh("git rev-parse HEAD^{tree}")
     local = {}
     for line in sh(f"git ls-tree -r {lt}").split("\n"):
         p = line.split(None, 3)

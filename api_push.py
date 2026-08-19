@@ -20,20 +20,33 @@ BRANCH = sys.argv[3]
 MSG = sys.argv[4] if len(sys.argv) > 4 else None
 
 
-def api(method, path, data=None):
+def api(method, path, data=None, tries=3):
+    import time
     url = f"https://api.github.com/repos/{REPO}/{path}"
     body = json.dumps(data).encode() if data is not None else None
-    req = urllib.request.Request(
-        url, data=body, method=method,
-        headers={"Authorization": f"token {TOKEN}",
-                 "Content-Type": "application/json",
-                 "User-Agent": "hermes-push/1.0"})
-    try:
-        resp = urllib.request.urlopen(req, timeout=120)
-        return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        print(f"  HTTP {e.code}: {e.read().decode()[:300]}")
-        raise
+    last = None
+    for i in range(tries):
+        req = urllib.request.Request(
+            url, data=body, method=method,
+            headers={"Authorization": f"token {TOKEN}",
+                     "Content-Type": "application/json",
+                     "User-Agent": "hermes-push/1.0"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=120)
+            return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            last = RuntimeError(f"HTTP {e.code}: {e.read().decode()[:200]}")
+            if e.code >= 500 and i < tries - 1:
+                time.sleep(5 * (i + 1))
+                continue
+            raise last
+        except Exception as e:
+            last = e
+            if i < tries - 1:
+                time.sleep(5 * (i + 1))
+                continue
+            raise last
+    raise last if last is not None else RuntimeError("unknown")
 
 
 def sh(cmd):
