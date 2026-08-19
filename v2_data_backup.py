@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""V2运行时数据每日备份 — 10:15 cron (2026-08-19新增)
-把5个不可重建/难重建的运行时数据快照进 ~/v2_cq_data_backup 并API推送到
-github wuya79/v2_cq_data_backup (git push协议被封锁, 走REST API增量推送)。
-- 无变化 → 静默退出0 (no_agent空stdout不打扰)
-- 永不exit非0 (防看门狗式错误告警; 失败仅打印)
+"""全系统关键数据每日备份 — 10:15 cron (2026-08-19 v2: 扩展为全系统)
+快照进 ~/v2_cq_data_backup 并按目录组织, REST API推送到 github wuya79/v2_cq_data_backup。
+覆盖: v2运行时数据 / 四川水情历史库 / hermes配置+记忆+skills / 原始数据归档 / 无git小项目代码
+- 无变化 → 静默退出0 (deliver=local, 不打扰)
+- 永不exit非0 (失败仅打印)
 """
 import base64
 import json
@@ -17,17 +17,34 @@ import urllib.request
 REPO = "wuya79/v2_cq_data_backup"
 CWD = os.path.expanduser("~/v2_cq_data_backup")
 BRANCH = "main"
+RSYNC = shutil.which("rsync")
 
-# 源文件 → 备份文件名
-SOURCES = {
-    "/home/ubuntu/v2_cq_strategy/reports/hourly_decisions.csv": "hourly_decisions.csv",
-    "/home/ubuntu/v2_cq_strategy/output/cq_price_history.json": "cq_price_history.json",
-    "/home/ubuntu/v2_cq_strategy/output/shadow_v2.csv": "shadow_v2.csv",
-    "/home/ubuntu/v2_cq_strategy/data/wx_history.json": "wx_history.json",
-    "/home/ubuntu/v2_cq_strategy/output/dart_cache.json": "dart_cache.json",
-    "/home/ubuntu/.hermes/metrics/v2_daily.jsonl": "v2_daily_metrics.jsonl",
-    "/home/ubuntu/.hermes/cron/jobs.json": "cron_jobs.json",
+# 单文件: 源路径 → 备份相对路径
+FILES = {
+    "/home/ubuntu/v2_cq_strategy/reports/hourly_decisions.csv": "v2/hourly_decisions.csv",
+    "/home/ubuntu/v2_cq_strategy/output/cq_price_history.json": "v2/cq_price_history.json",
+    "/home/ubuntu/v2_cq_strategy/output/shadow_v2.csv": "v2/shadow_v2.csv",
+    "/home/ubuntu/v2_cq_strategy/data/wx_history.json": "v2/wx_history.json",
+    "/home/ubuntu/v2_cq_strategy/output/dart_cache.json": "v2/dart_cache.json",
+    "/home/ubuntu/.hermes/metrics/v2_daily.jsonl": "v2/v2_daily_metrics.jsonl",
+    "/home/ubuntu/sichuan_hydro_price/.reservoir_history.json": "sichuan/reservoir_history.json",
+    "/home/ubuntu/sichuan_hydro_price/.monthly_trade_archive.json": "sichuan/monthly_trade_archive.json",
+    "/home/ubuntu/.hermes/config.yaml": "hermes/config.yaml",
+    "/home/ubuntu/.hermes/.env": "hermes/env.txt",
+    "/home/ubuntu/.hermes/cron/jobs.json": "hermes/cron_jobs.json",
+    "/home/ubuntu/.hermes/memories/MEMORY.md": "hermes/memories/MEMORY.md",
+    "/home/ubuntu/.hermes/memories/USER.md": "hermes/memories/USER.md",
 }
+
+# 目录: 源目录 → 备份相对目录 (rsync增量/整树复制, 排除嵌套.git和锁文件)
+DIRS = {
+    "/home/ubuntu/.hermes/skills": "hermes/skills",
+    "/home/ubuntu/data_archive": "raw/data_archive",
+    "/home/ubuntu/sichuan_news_brief": "projects/sichuan_news_brief",
+    "/home/ubuntu/sichuan_weather_brief": "projects/sichuan_weather_brief",
+}
+RSYNC_EXCLUDES = ["--exclude=.git/", "--exclude=*.lock", "--exclude=__pycache__/",
+                  "--exclude=*.pyc", "--exclude=cache/", "--exclude=*.png"]
 
 
 def sh(cmd):
@@ -56,22 +73,38 @@ def main():
     if not os.path.exists(os.path.join(CWD, ".git")):
         subprocess.run("git init -b main", shell=True, cwd=CWD, check=True)
 
-    # 1. 快照
-    for src, name in SOURCES.items():
+    # 1. 单文件快照
+    for src, rel in FILES.items():
         if os.path.exists(src):
-            shutil.copy2(src, os.path.join(CWD, name))
+            dst = os.path.join(CWD, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
 
-    # 2. commit (无变化则静默)
+    # 2. 目录快照
+    for src, rel in DIRS.items():
+        if not os.path.isdir(src):
+            continue
+        dst = os.path.join(CWD, rel)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if RSYNC:
+            subprocess.run(["rsync", "-a", "--delete"] + RSYNC_EXCLUDES
+                           + [src.rstrip("/") + "/", dst + "/"],
+                           check=False)
+        else:
+            subprocess.run(["cp", "-r", src.rstrip("/") + "/.", dst],
+                           check=False)
+
+    # 3. commit (无变化则静默)
     subprocess.run("git add -A", shell=True, cwd=CWD, check=True)
     diff = sh("git diff --cached --stat")
     if not diff:
-        print("无变化, 跳过")  # deliver=local, 不打扰用户
+        print("无变化, 跳过")
         return
     from datetime import datetime
-    msg = f"数据快照 {datetime.now():%Y-%m-%d}"
+    msg = f"全系统数据快照 {datetime.now():%Y-%m-%d}"
     subprocess.run(f"git commit -m '{msg}'", shell=True, cwd=CWD, check=True)
 
-    # 3. API增量推送
+    # 4. API增量推送
     base = api("GET", f"git/refs/heads/{BRANCH}")["object"]["sha"]
     bt = api("GET", f"git/commits/{base}")["tree"]["sha"]
     rt = api("GET", f"git/trees/{bt}?recursive=1")["tree"]
