@@ -41,6 +41,8 @@ def main() -> None:
                     content = f.read().strip()
                 if content:
                     resends.append(f"🔁 {label}补发（主推送被限流）\n\n{content}")
+                else:
+                    resends.append(f"⚠️ {label}今日推送失败且内容为空({content_path})，请人工检查")
             else:
                 resends.append(f"⚠️ {label}今日推送失败且内容文件缺失({content_path})，请人工检查")
 

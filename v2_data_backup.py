@@ -25,6 +25,8 @@ SOURCES = {
     "/home/ubuntu/v2_cq_strategy/output/shadow_v2.csv": "shadow_v2.csv",
     "/home/ubuntu/v2_cq_strategy/data/wx_history.json": "wx_history.json",
     "/home/ubuntu/v2_cq_strategy/output/dart_cache.json": "dart_cache.json",
+    "/home/ubuntu/.hermes/metrics/v2_daily.jsonl": "v2_daily_metrics.jsonl",
+    "/home/ubuntu/.hermes/cron/jobs.json": "cron_jobs.json",
 }
 
 
