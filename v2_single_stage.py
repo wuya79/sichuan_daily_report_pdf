@@ -97,25 +97,29 @@ def run_step(cmd, wall_s, tag):
 
 
 def check_d1_in_price():
-    """价格库是否含完整D-1(24h da/rt全有值且不全0, 同fetch_price的_is_complete)"""
+    """价格库是否含完整D-1(24h da/rt全有值且不全0, 同fetch_price的_is_complete)
+    返回 (ok, warn_msg或None)"""
     try:
         with open(PH) as f:
             ph = json.load(f)
     except Exception:
-        return False
+        return False, '价格库读取失败'
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     for rec in ph:
         if rec.get('date') != yesterday:
             continue
         ok = True
+        warn = None
         for key in ('da', 'rt'):
             arr = rec.get(key) or []
             if len(arr) != 24 or any(v is None for v in arr):
                 ok = False
             if all(v == 0 for v in arr):
+                # 2026-09-02守卫: 0元地板价真实存在(2026-08-30实测), 不再静默
+                warn = f'⚠️ D-1 {key}全天为0: 疑似污染或极端地板价, 请人工确认'
                 ok = False
-        return ok
-    return False
+        return ok, warn
+    return False, '价格库无D-1记录'
 
 
 def check_feat_integrity():
@@ -173,7 +177,10 @@ def main():
     rc, out = run_step(f'python3 {FETCH}', WALLS['fetch'], 'fetch价格')
     if rc != 0:
         warns.append('⚠️ 价格补拉失败/超时, 特征表将不含D-1(同现状)')
-    log(f'   价格库D-1完整: {check_d1_in_price()}')
+    _ok, _warn = check_d1_in_price()
+    log(f'   价格库D-1完整: {_ok}')
+    if _warn:
+        warns.append(_warn)
 
     # ── 2. 特征表重建(含D-1若拉到) ──
     rc, out = run_step('python3 retrain.py --features-only', WALLS['feat'],

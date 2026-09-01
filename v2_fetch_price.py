@@ -32,6 +32,8 @@ def _is_complete(rec):
         if len(arr) != 24 or any(v is None for v in arr):
             return False
         if all(v == 0 for v in arr):
+            # 2026-09-02守卫: 不再静默——0元地板价真实存在(2026-08-30实测), 提示人工确认
+            print(f"⚠ {rec.get('date')} {key}全天为0: 疑似数据污染或极端地板价, 跳过写入, 请人工确认")
             return False
     return True
 
@@ -53,6 +55,9 @@ def _fetch_day(ds):
                 break
     da_list = _aggregate_to_hourly(da_raw)
     rt_list = _aggregate_to_hourly(rt_raw)
+    if not da_raw and not rt_raw:
+        # 2026-09-02守卫: 上游字段名变化(如V0005→V0005出清节点电价)时正则静默拉空
+        print(f"⚠ {ds}: 上游V字段未匹配(字段名可能变化), da/rt原始点均为空, 请检查API返回结构")
     if any(v is not None for v in da_list) and any(v is not None for v in rt_list):
         return {"date": ds, "da": da_list, "rt": rt_list}
     return None
