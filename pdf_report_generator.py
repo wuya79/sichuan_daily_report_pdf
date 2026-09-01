@@ -106,7 +106,7 @@ def kimi_call_with_fallback(api_key_open: str, api_key_code: str,
         log.warning(f"[PRIMARY] ⚠️ {type(e).__name__}，切换到 Code Plan...")
         if not api_key_code:
             raise RuntimeError(f"开放平台{type(e).__name__}，但 Code Plan key 未配置，无法切换") from e
-    # 401/400 不切换，直接向上抛
+    # 401/400 等所有 API 错误(4xx/5xx)/超时均会切换到 Code Plan
 
     # 备用平台（Code Plan，temperature=1）
     log.info("[FALLBACK] Kimi Code Plan...")
@@ -394,7 +394,33 @@ def _call_kimi_for_analysis(api_key_open: str, api_key_code: str, report_text: s
 
 # ─── 生成HTML（单轮） ─────────────────────────────────────────────
 
-def generate_html_single_round(report_text: str, charts_dir: str, api_key_open: str, api_key_code: str) -> str:
+def validate_data_integrity(html: str, report_text: str):
+    """数据完整性校验(2026-09-01新增, 与发电侧同款, 应对temp=1输出漂移漏数据):
+    hard集=4个关键指标必须出现; soft集=txt中所有"数字+单位"覆盖率≥85%
+    Returns: (ok, missing_hard, coverage_ratio)
+    """
+    hard_pat = {
+        '均价': (r'昨日均价\s*(\d+(?:\.\d+)?)\s*元', r'{v}\s*元'),
+        '净缺口': (r'净缺口\s*(-?\d+(?:\.\d+)?)\s*MW', r'{v}\s*MW'),
+        '水电占比': (r'水电\s*(\d+(?:\.\d+)?)\s*%', r'{v}\s*%'),
+        '负载率': (r'火电负载率\s*(\d+(?:\.\d+)?)\s*%', r'{v}\s*%'),
+    }
+    missing = []
+    for name, (pat, unit_pat) in hard_pat.items():
+        m = re.search(pat, report_text)
+        if m is None:
+            log.warning(f"  [校验] txt中未找到{name}字段(格式可能变化), 计入缺失防静默失效")
+            missing.append(name)
+            continue
+        if not re.search(unit_pat.format(v=re.escape(m.group(1).lstrip('-'))), html):
+            missing.append(name)
+    nums = re.findall(r'(\d+(?:\.\d+)?)\s*(?:元|MW|%)', report_text)
+    nums = [n.lstrip('-') for n in nums]
+    ratio = sum(1 for n in nums if n in html) / len(nums) if nums else 1.0
+    return (len(missing) == 0 and ratio >= 0.85), missing, ratio
+
+
+def generate_html_single_round(report_text: str, charts_dir: str, api_key_open: str, api_key_code: str) -> tuple:
     """单轮调用Kimi生成完整HTML。"""
     chart_files = sorted(Path(charts_dir).glob("*.png")) if os.path.exists(charts_dir) else []
     chart_refs = "\n".join([f'<img src="charts/{f.name}">' for f in chart_files]) if chart_files else ""
@@ -424,11 +450,26 @@ def generate_html_single_round(report_text: str, charts_dir: str, api_key_open: 
 
 请直接输出完整HTML代码。"""
 
-    log.info("调用Kimi API生成HTML...")
-    raw = kimi_call_with_fallback(api_key_open, api_key_code, system_prompt, user_message, timeout=600)
-    html = extract_html(raw)
-    log.info(f"HTML生成完成: {len(html)}字符")
-    return html
+    # 完整性校验+最多3次尝试 (2026-09-01新增, 与发电侧同款, 应对temp=1漂移漏数据)
+    integrity_warning = False
+    html = ""
+    missing = None
+    for attempt in range(1, 4):
+        msg = user_message
+        if missing:
+            msg = user_message + f"\n\n【重要】上次输出缺关键数据: {missing}。请确保均价/净缺口/水电占比/负载率全部出现在正文中。"
+        raw = kimi_call_with_fallback(api_key_open, api_key_code, system_prompt, msg, timeout=600)
+        html = extract_html(raw)
+        ok, missing, ratio = validate_data_integrity(html, report_text)
+        if ok and "</html>" in html:
+            log.info(f"HTML生成完成: {len(html)}字符, 完整性校验通过(第{attempt}次, 覆盖率{ratio:.0%})")
+            break
+        if attempt < 3:
+            log.warning(f"  第{attempt}次校验未通过: 缺{missing or '结构'}, 覆盖率{ratio:.0%}，重试...")
+        else:
+            integrity_warning = True
+            log.error(f"  ⚠️ 3次生成均未通过完整性校验(缺{missing}, 覆盖率{ratio:.0%})，使用最后一次输出并标注告警")
+    return html, integrity_warning
 
 
 # ─── OSS 上传（阿里云对象存储） ──────────────────────────────
@@ -530,10 +571,10 @@ def generate_pdf(api_key_open: str, api_key_code: str) -> dict:
             log.warning(f"  图表生成失败（跳过）: {e}")
             chart_files = []
 
-        # 3. 生成HTML（单轮Kimi）
+        # 3. 生成HTML（单轮Kimi, 带完整性校验+最多3次尝试）
         log.info("Step 3: 生成HTML...")
         try:
-            html = generate_html_single_round(report_text, str(charts_dir), api_key_open, api_key_code)
+            html, integrity_warning = generate_html_single_round(report_text, str(charts_dir), api_key_open, api_key_code)
         except Exception as e:
             raise RuntimeError(f"HTML生成失败: {e}") from e
 
@@ -597,6 +638,7 @@ def generate_pdf(api_key_open: str, api_key_code: str) -> dict:
             "date": date_str,
             "tables": html.count("<table>"),
             "charts": len(chart_files),
+            "integrity_warning": integrity_warning,
         })
 
         # 清理临时job目录
