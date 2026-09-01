@@ -171,3 +171,69 @@ for fname in sorted(os.listdir(ARCHIVE_DIR)):
     print(f'  ✅ {run_date}: {len(rows)}笔')
 
 print(f'本次追加 {appended} 天')
+
+
+# ============================================================
+# 4. 35d执行结算 (2026-08-23新增): 从归档读action_25d/position_multiplier_25d
+#    独立幂等遍历(35d_settle.csv自己的existing集合, 不受全量existing影响→首次跑自动回填历史)
+#    ⚠️ 口径: 等权±spread + 仓位口径×乘数; 08-23起乘数含P_big加权(口径断点, 日报披露)
+#    ⚠️ 失败不阻塞全量结算主流程
+# ============================================================
+S35 = '/home/ubuntu/v2_cq_strategy/output/35d_settle.csv'
+try:
+    _s35_existing = set()
+    _s35_old = None
+    if os.path.exists(S35):
+        _s35_old = pd.read_csv(S35)
+        _s35_old['date'] = _s35_old['date'].astype(str)
+        _s35_existing = set(_s35_old['date'].unique())
+    _s35_rows = []
+    for fname in sorted(os.listdir(ARCHIVE_DIR)):
+        m = ARCHIVE_RE.match(fname)
+        if not m:
+            continue
+        run_date = m.group(1)
+        if run_date in _s35_existing:
+            continue
+        prices = price_by_date.get(run_date)
+        if not prices:
+            continue
+        try:
+            v2 = json.load(open(os.path.join(ARCHIVE_DIR, fname)))
+        except Exception:
+            continue
+        _day_rows = []
+        for h in v2.get('hours', []):
+            hh = int(h['hour'][:2])
+            da = prices['da'][hh] if hh < len(prices.get('da', [])) else None
+            rt = prices['rt'][hh] if hh < len(prices.get('rt', [])) else None
+            if da is None or rt is None:
+                continue
+            spread = rt - da
+            a25 = h.get('action_25d')
+            if a25 not in ('做多', '做少') or abs(spread) <= SPREAD_T:
+                continue
+            pnl_eq = spread if a25 == '做多' else -spread
+            _m25 = h.get('position_multiplier_25d')
+            _m25 = float(_m25) if _m25 is not None else 1.0
+            _day_rows.append({
+                'date': run_date, 'hour': hh, 'action_25d': a25,
+                'spread': spread, 'pnl_equal_35d': pnl_eq,
+                'pnl_pos_35d': pnl_eq * _m25,
+            })
+        if _day_rows:
+            _s35_rows.extend(_day_rows)
+    if _s35_rows:
+        _s35_new = pd.DataFrame(_s35_rows)
+        if _s35_old is not None:
+            _s35_comb = pd.concat([_s35_old, _s35_new], ignore_index=True)
+        else:
+            _s35_comb = _s35_new
+        _s35_tmp = S35 + '.tmp'
+        _s35_comb.to_csv(_s35_tmp, index=False)
+        os.replace(_s35_tmp, S35)
+        print(f'35d结算: 新增{len(_s35_rows)}笔 ({_s35_new["date"].min()}~{_s35_new["date"].max()})')
+    else:
+        print('35d结算: 无新增')
+except Exception as _e35:
+    print(f'⚠ 35d结算失败({_e35}), 不影响全量结算')
