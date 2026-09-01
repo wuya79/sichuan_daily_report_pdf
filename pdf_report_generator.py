@@ -38,11 +38,11 @@ LOG_FILE = os.path.expanduser("~/.hermes/logs/pdf_report_generator.log")
 DAILY_TXT = Path(NGINX_DIR) / "daily_latest.txt"  # 本地读，不依赖nginx
 
 KIMI_BASE_URL_OPEN = "https://api.moonshot.cn/v1"
-KIMI_MODEL_OPEN = "moonshot-v1-128k"
+KIMI_MODEL_OPEN = "kimi-k2.7-code-highspeed"  # 2026-09-01: moonshot-v1-128k 已下线，换新模型（强制temp=1）
 
 # Kimi Code Plan（备用，限流/超时时切换）
 KIMI_BASE_URL_CODE = "https://api.kimi.com/coding/v1"
-KIMI_MODEL_CODE = "moonshot-v1-128k"
+KIMI_MODEL_CODE = "kimi-for-coding-highspeed"  # 2026-09-01: moonshot-v1-128k 在 Code Plan 也已下线
 
 # ─── Skill Assets ───────────────────────────────────────────────
 SKILL_DIR = Path.home() / ".hermes" / "skills" / "document-processing" / "scu-power-report"
@@ -93,11 +93,11 @@ def kimi_call_with_fallback(api_key_open: str, api_key_code: str,
         {"role": "user", "content": user_message},
     ]
 
-    # 尝试主平台（开放平台，temperature=0.2）
+    # 尝试主平台（开放平台，temperature=1 —— 2026-09-01 起新模型强制 temp=1）
     try:
         log.info("[PRIMARY] Kimi开放平台...")
         result = _do_openai_call(api_key_open, KIMI_BASE_URL_OPEN, KIMI_MODEL_OPEN,
-                                 messages, temperature=0.2, max_tokens=max_tokens, timeout=timeout)
+                                 messages, temperature=1, max_tokens=max_tokens, timeout=timeout)
         log.info("[PRIMARY] ✅")
         return result
     except (openai.RateLimitError, openai.InternalServerError,
@@ -372,7 +372,7 @@ def _call_kimi_for_analysis(api_key_open: str, api_key_code: str, report_text: s
         # 主平台
         try:
             text = _do_openai_call(api_key_open, KIMI_BASE_URL_OPEN, KIMI_MODEL_OPEN,
-                                   messages, temperature=0.3, max_tokens=2000, timeout=60)
+                                   messages, temperature=1, max_tokens=2000, timeout=60)
             text = text.strip()
             if "```" in text:
                 text = text.split("```")[1].split("```")[0].strip() if "```" in text else text

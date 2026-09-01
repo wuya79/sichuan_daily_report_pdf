@@ -76,10 +76,9 @@ for i, p in enumerate(changed):
     if (i + 1) % 50 == 0:
         print(f"  blob {i + 1}/{len(changed)}")
 
+# 以本地tree为唯一真相源（squash语义）：本地已删除的文件也从远程移除
 entries = [{"path": p, "mode": m, "type": "blob", "sha": s}
-           for p, (s, m) in remote.items() if p not in changed]
-entries += [{"path": p, "mode": m, "type": "blob", "sha": s}
-            for p, (s, m) in local.items() if p in changed]
+           for p, (s, m) in local.items()]
 new_tree = api("POST", "git/trees", {"tree": entries})["sha"]
 print(f"  tree={new_tree[:8]}")
 
