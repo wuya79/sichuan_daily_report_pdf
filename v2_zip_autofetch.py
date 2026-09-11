@@ -7,6 +7,7 @@
 安全: HEAD探测→临时文件下载→zip有效性校验→路径穿越防护→临时目录解包后rename; 状态去重, 失败下次重试。
 参数: --dry                 全流程使用 /tmp/zip_autofetch_test/ 沙箱(不碰真实目录与fb)
       --force-d8 YYYYMMDD   强制处理指定日期(绕过状态与目录占位)
+      --backfill A [B]      历史区间回填(A~B含端点, 缺B=单日; 末尾统一重建fb并输出报告)
 """
 import json, os, re, shutil, subprocess, sys, time, urllib.error, urllib.request, zipfile
 from datetime import date, timedelta
@@ -18,6 +19,12 @@ DRY = '--dry' in sys.argv
 FORCE = None
 if '--force-d8' in sys.argv:
     FORCE = sys.argv[sys.argv.index('--force-d8') + 1]
+BACKFILL = None
+if '--backfill' in sys.argv:
+    _i = sys.argv.index('--backfill')
+    _a = sys.argv[_i + 1]
+    _b = sys.argv[_i + 2] if len(sys.argv) > _i + 2 and not sys.argv[_i + 2].startswith('--') else _a
+    BACKFILL = (_a, _b)
 
 if DRY:
     ROOT = '/tmp/zip_autofetch_test'
@@ -118,10 +125,16 @@ def main():
     msgs = []
     if FORCE:
         cands = [FORCE]
+    elif BACKFILL:
+        _s = date(int(BACKFILL[0][:4]), int(BACKFILL[0][4:6]), int(BACKFILL[0][6:8]))
+        _e = date(int(BACKFILL[1][:4]), int(BACKFILL[1][4:6]), int(BACKFILL[1][6:8]))
+        cands = [(_s + timedelta(days=k)).strftime('%Y%m%d') for k in range((_e - _s).days + 1)]
     else:
         today = date.today()
         cands = [(today - timedelta(days=k)).strftime('%Y%m%d') for k in range(0, 4)]
     new_extract = False
+    n_dl = n_skip = 0
+    missing = []
     for d8 in cands:
         if not FORCE and st.get(d8, {}).get('status') == 'done':
             continue
@@ -131,21 +144,25 @@ def main():
             n = sum(1 for _, _, fs in os.walk(dest) for f in fs if f.endswith('.xlsx'))
             if n >= 15:
                 st[d8] = {'status': 'done', 'note': 'pre-extracted', 'files': n, 'at': _now()}
+                n_skip += 1
                 continue
         code, size = check(d8)
         if code != 200:
             st[d8] = {'status': f'http{code}', 'at': _now()}
+            if BACKFILL:
+                missing.append(f'{d8}:{code}')
             continue
         try:
             zp, zsize = download(d8)
             dest, n = extract(d8, zp)
             st[d8] = {'status': 'done', 'zip_bytes': zsize, 'files': n, 'at': _now()}
             new_extract = True
+            n_dl += 1
             msgs.append(f'✅ OSS {d8}.zip 已拉取+解包: {zsize/1024:.0f}KB, {n}文件 → z{d8}/')
         except Exception as e:
             st[d8] = {'status': 'error', 'err': str(e)[:200], 'at': _now()}
             msgs.append(f'⚠ {d8}.zip 处理失败: {e}')
-    if new_extract:
+    if new_extract or BACKFILL:
         try:
             rc, vline, tail = rebuild_fb()
             okmark = '✅' if (rc == 0 and vline == '无') else '⚠'
@@ -154,6 +171,9 @@ def main():
                 msgs.append(f'   builder尾行: {tail[:200]}')
         except Exception as e:
             msgs.append(f'⚠ 兜底缓存重建异常: {e}')
+    if BACKFILL:
+        msgs.append(f'回填报告 {BACKFILL[0]}~{BACKFILL[1]}: 共{len(cands)}天 | 新处理{n_dl} | 已有跳过{n_skip} | 缺包{len(missing)}'
+                    + (f' [{", ".join(missing[:10])}{"..." if len(missing) > 10 else ""}]' if missing else ''))
     _save_state(st)
     if msgs:
         print('\n'.join(msgs))
