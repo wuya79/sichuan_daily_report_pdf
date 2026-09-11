@@ -13,6 +13,7 @@ from datetime import date, timedelta
 
 PH = '/home/ubuntu/v2_cq_strategy/output/cq_price_history.json'
 API_URL = 'http://127.0.0.1:45678/api/query'
+TRADE_URL = 'http://127.0.0.1:45678/api/trade'
 V_RE = re.compile(r'^V(\d{4})')
 
 
@@ -38,6 +39,34 @@ def _is_complete(rec):
     return True
 
 
+def _fetch_rt_trade(ds):
+    """系统 t2 空时，用交易接口 t12（实时出清结果）兜底 rt。
+    口径：实时出清结果（正常日与节点价基本一致、个别点有差——见 skill 验证文档）。
+    只读；密钥由 cq-web 注入；仅在系统通道当日空时触发。
+    v1.2(2026-09-10): 逐点容错——单个坏点跳过不拖垮整次兜底；千分位逗号兼容。"""
+    try:
+        req = urllib.request.Request(
+            TRADE_URL,
+            json.dumps({"data_type": 12, "info_date": ds}).encode(),
+            {"Content-Type": "application/json"})
+        r = json.loads(urllib.request.urlopen(req, timeout=15).read())
+        out, skipped = {}, 0
+        for x in r.get("data", []) or []:
+            try:
+                if str(x.get("info_type")) != "1":
+                    continue
+                hh, mm = str(x.get("info_time")).split(':')
+                out[f"{int(hh):02d}{int(mm):02d}"] = float(str(x.get("info_value")).replace(",", ""))
+            except Exception:
+                skipped += 1
+        if skipped:
+            print(f"  ⚠ {ds}: 交易t12兜底解析跳过 {skipped} 个异常点（其余 {len(out)} 点已采用）")
+        return out
+    except Exception as e:
+        print(f"  ⚠ {ds}: 交易t12兜底调用异常: {e}")
+        return {}
+
+
 def _fetch_day(ds):
     da_raw, rt_raw = {}, {}
     for tid, store in ((5, da_raw), (2, rt_raw)):
@@ -53,11 +82,18 @@ def _fetch_day(ds):
                     if m and v not in (None, "", "-"):
                         store[m.group(1)] = float(str(v).replace(",", ""))
                 break
+    if not rt_raw:
+        _rt_fb = _fetch_rt_trade(ds)
+        if _rt_fb:
+            rt_raw = _rt_fb
+            print(f"  ℹ {ds}: 系统 rt 空 → 交易t12（实时出清结果）兜底 {len(_rt_fb)}点")
+        else:
+            print(f"  ⚠ {ds}: rt 系统通道空，交易t12兜底亦不可用")
     da_list = _aggregate_to_hourly(da_raw)
     rt_list = _aggregate_to_hourly(rt_raw)
-    if not da_raw and not rt_raw:
-        # 2026-09-02守卫: 上游字段名变化(如V0005→V0005出清节点电价)时正则静默拉空
-        print(f"⚠ {ds}: 上游V字段未匹配(字段名可能变化), da/rt原始点均为空, 请检查API返回结构")
+    if not da_raw:
+        # 2026-09-02守卫; v1.2(2026-09-10): 改为 da 空即提示——rt 空现由兜底专线日志覆盖，da 空无论 rt 状态都须可见
+        print(f"⚠ {ds}: da 原始点为空（t5未发布或字段名变化），请检查API返回结构；rt侧{'有' if rt_raw else '无'}点")
     if any(v is not None for v in da_list) and any(v is not None for v in rt_list):
         return {"date": ds, "da": da_list, "rt": rt_list}
     return None
@@ -85,6 +121,12 @@ def main():
         while d.isoformat() <= yesterday:
             targets.append(d.isoformat())
             d += timedelta(days=1)
+
+    # v1.3(2026-09-10): 最近7天缺口扫描——中间缺失日补拉（覆盖"非连续段"缺口）
+    _recent = [(date.fromisoformat(yesterday) - timedelta(days=k)).isoformat() for k in range(7)]
+    _missing = [ds for ds in _recent if ds not in by_date]
+    if _missing:
+        targets = sorted(set(targets) | set(_missing))
 
     if not targets:
         print("价格库已最新（到昨天），无需补拉")
