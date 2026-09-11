@@ -7,7 +7,9 @@ import json, os, time, urllib.request, urllib.error, datetime
 
 BASE = 'https://electricity-bill.oss-cn-chengdu.aliyuncs.com/chongqing'
 STATE = os.path.expanduser('~/.hermes/scripts/oss_probe_state.json')
-WATCH = ['20260910', '20260911']  # 今日包 + 明日包(观察提前量)
+# 2026-09-11: 动态窗口(昨/今/明) — 原硬编码日期过期后无法覆盖新包; 自动拉取由 v2_zip_autofetch(7:30/14:30~23:30)负责
+_today = datetime.date.today()
+WATCH = [(_today + datetime.timedelta(days=k)).strftime('%Y%m%d') for k in (-1, 0, 1)]
 
 def check(d):
     url = f'{BASE}/{d}.zip'

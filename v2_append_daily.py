@@ -5,9 +5,29 @@
 逻辑：遍历归档目录，找到所有「运行日」的策略归档，
       对照运行日实际价差，计算PnL/准确率，追加到 hourly_decisions.csv
       已存在的日期跳过（幂等）。
+
+2026-09-11 改造(用户批准):
+- stdout 只在异常时输出(异常才推送用户); 过程明细写 output/append_daily.log
+- 自拉取与 v2_fetch_price 同口径: 系统t2空→交易t12兜底; 完整性校验(24h无None且不全0)
+- 异常判定: 复盘结算滞后(最新<D-2) / 价格缺失超窗 / 有价未入账
+
+命名说明(2026-09-11, 审计P3): 读写的 `action_25d`/`position_multiplier_25d` 等列名中, `_25d` 为
+35d 系历史命名(模型文件实为 *_35d.json), 属策略归档/35d_settle.csv 的跨系统契约, 禁止单方面改名。
 """
-import json, pandas as pd, os, re, shutil
+import json, pandas as pd, os, re, shutil, sys
 from datetime import date, timedelta
+
+# ── 输出重定向: 过程→日志文件, stdout仅异常 (2026-09-11) ──
+_LOGF = open('/home/ubuntu/v2_cq_strategy/output/append_daily.log', 'a')
+_STDOUT = sys.stdout
+def print(*args, **kw):  # noqa: A001
+    try:
+        _LOGF.write(' '.join(str(a) for a in args) + '\n'); _LOGF.flush()
+    except Exception:
+        pass
+_PROBLEMS = []
+def problem(msg):
+    _PROBLEMS.append(str(msg))
 
 HDF = '/home/ubuntu/v2_cq_strategy/reports/hourly_decisions.csv'
 ARCHIVE_DIR = '/home/ubuntu/v2_cq_strategy/output/archive'
@@ -66,9 +86,29 @@ if _missing_dates:
                             if _m2 and _v not in (None, "", "-"):
                                 _store[_m2.group(1)] = float(str(_v).replace(",", ""))
                         break
+            if not _rt_raw:
+                # 2026-09-11: 与v2_fetch_price同口径 — 系统t2空→交易t12兜底
+                try:
+                    _treq = _ur_v2.Request('http://127.0.0.1:45678/api/trade',
+                        json.dumps({"data_type": 12, "info_date": _d}).encode(),
+                        {"Content-Type": "application/json"})
+                    _tr = json.loads(_ur_v2.urlopen(_treq, timeout=15).read())
+                    for _x in _tr.get("data", []) or []:
+                        try:
+                            if str(_x.get("info_type")) != "1": continue
+                            _hh, _mm = str(_x.get("info_time")).split(':')
+                            _rt_raw[f"{int(_hh):02d}{int(_mm):02d}"] = float(str(_x.get("info_value")).replace(",", ""))
+                        except Exception:
+                            pass
+                    if _rt_raw:
+                        print(f'  ℹ {_d}: rt系统空 → 交易t12兜底 {len(_rt_raw)}点')
+                except Exception as _te:
+                    print(f'  ⚠ {_d}: 交易t12兜底失败({_te})')
             _da_list = _aggregate_to_hourly(_da_raw)
             _rt_list = _aggregate_to_hourly(_rt_raw)
-            if any(v is not None for v in _da_list) and any(v is not None for v in _rt_list):
+            _da_ok = len(_da_list) == 24 and all(v is not None for v in _da_list) and not all(v == 0 for v in _da_list)
+            _rt_ok = len(_rt_list) == 24 and all(v is not None for v in _rt_list) and not all(v == 0 for v in _rt_list)
+            if _da_ok and _rt_ok:
                 ph.append({"date": _d, "da": _da_list, "rt": _rt_list})
                 price_by_date[_d] = ph[-1]
                 _tmp = PH + '.tmp'
@@ -237,3 +277,34 @@ try:
         print('35d结算: 无新增')
 except Exception as _e35:
     print(f'⚠ 35d结算失败({_e35}), 不影响全量结算')
+
+# ═══ 异常汇总 (2026-09-11): 仅异常时输出到stdout (会被推送用户) ═══
+try:
+    _expect_min = (date.today() - timedelta(days=2)).isoformat()
+    _hdf_now = pd.read_csv(HDF)
+    _hdf_now['date'] = _hdf_now['date'].astype(str)
+    _latest_h = _hdf_now['date'].max()
+    if _latest_h < _expect_min:
+        problem(f'复盘结算滞后: hourly_decisions 最新={_latest_h} < 期望≥{_expect_min}')
+    if os.path.exists(ARCHIVE_DIR):
+        _arch_dates = sorted({m.group(1) for fname in os.listdir(ARCHIVE_DIR)
+                              for m in [ARCHIVE_RE.match(fname)] if m})
+        _hdf_dates = set(_hdf_now['date'].unique())
+        for _ad in _arch_dates:
+            if _ad < _expect_min:
+                if _ad not in price_by_date:
+                    problem(f'价格缺失超窗: {_ad} (归档在/价格无, 上游发布或拉取异常)')
+                elif _ad not in _hdf_dates:
+                    problem(f'有价未入账: {_ad} (价格在库但未追加, 请检查)')
+except Exception as _e_sum:
+    problem(f'异常汇总检查失败: {_e_sum}')
+
+if _PROBLEMS:
+    _STDOUT.write('⚠️ v2_append_daily 异常:\n')
+    for _p in _PROBLEMS:
+        _STDOUT.write(f'  - {_p}\n')
+    _STDOUT.flush()
+try:
+    _LOGF.close()
+except Exception:
+    pass

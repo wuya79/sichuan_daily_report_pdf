@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """全系统关键数据每日备份 — 10:15 cron (2026-08-19 v2: 扩展为全系统)
 快照进 ~/v2_cq_data_backup 并按目录组织, REST API推送到 github wuya79/v2_cq_data_backup。
-覆盖: v2运行时数据 / 四川水情历史库 / hermes配置+记忆+skills / 原始数据归档 / 无git小项目代码
+覆盖: v2运行时数据(含模型/归档/replay, 2026-09-11补) / 四川水情历史库 / hermes配置+记忆+skills / 原始数据归档 / 无git小项目代码
 - 无变化 → 静默退出0 (deliver=local, 不打扰)
 - 永不exit非0 (失败仅打印)
 """
@@ -52,6 +52,11 @@ DIRS = {
     "/home/ubuntu/data_archive": "raw/data_archive",
     "/home/ubuntu/sichuan_news_brief": "projects/sichuan_news_brief",
     "/home/ubuntu/sichuan_weather_brief": "projects/sichuan_weather_brief",
+    # 2026-09-11 补覆盖(审计P2a): V2模型(含35d系) + 策略归档 + replay(回测镜子)
+    "/home/ubuntu/v2_cq_strategy/models": "v2/models",
+    "/home/ubuntu/v2_cq_strategy/output/archive": "v2/archive",
+    "/home/ubuntu/v2_cq_strategy/output/replay_inputs": "v2/replay_inputs",
+    "/home/ubuntu/v2_cq_strategy/output/replay_rebuilt": "v2/replay_rebuilt",
 }
 RSYNC_EXCLUDES = ["--exclude=.git/", "--exclude=*.lock", "--exclude=__pycache__/",
                   "--exclude=*.pyc", "--exclude=cache/", "--exclude=*.png",
@@ -182,11 +187,12 @@ def main():
         list(ex.map(_up, changed))
     print(f"  blob上传完成 {_done[0]}/{len(changed)} "
           f"耗时{_time.time() - _t0:.0f}s", flush=True)
-    entries = [{"path": p, "mode": m, "type": "blob", "sha": s}
-               for p, (s, m) in remote.items() if p not in changed]
-    entries += [{"path": p, "mode": m, "type": "blob", "sha": s}
-                for p, (s, m) in local.items() if p in changed]
-    new_tree = api("POST", "git/trees", {"tree": entries})["sha"]
+    # 2026-09-11: 增量建树(base_tree) — 全量entries在repo增长后必中GitHub
+    # "input too large, build tree incrementally"(09-07起422/400/504连续失败, 远端停在09-06)
+    changed_entries = [{"path": p, "mode": m, "type": "blob", "sha": s}
+                       for p, (s, m) in local.items() if p in changed]
+    new_tree = api("POST", "git/trees",
+                   {"base_tree": bt, "tree": changed_entries})["sha"]
     an = sh("git log --format=%an -1 HEAD")
     ae = sh("git log --format=%ae -1 HEAD")
     ad = sh("git log --format=%aI -1 HEAD")

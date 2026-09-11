@@ -3,6 +3,9 @@
 v1(2026-08-20): 8项基础检查(commit/引用/镜像/语法/敏感/文件/cron/working tree)
 v2(2026-08-20): +退出码汇总(可CI) +镜像权限一致性 +.gitignore例外实测
                 +文档漂移检查(OPERATIONS vs jobs.json) +管道吞错反模式扫描
+v3(2026-09-10): 镜像对清单纳入 v2_trade_crosscheck.py
+v4(2026-09-11): 镜像对清单纳入 v2_fusion_prefetch.py(双源融合组件)
+v5(2026-09-11): 镜像对+语法清单纳入 v2_zip_autofetch.py(zip自动拉取); §13预留键豁免(rule_timeline)
 用法: python3 audit_cron_changes.py [--since YYYY-MM-DD]
 退出码: 0=全部OK; 1=存在FAIL/DIFF/MISS/ALERT/HIT(可挂cron自动告警)
 """
@@ -86,6 +89,9 @@ pairs = [
     (SC/'v2_retrain.sh', V2/'cron/v2_retrain.sh'),
     (SC/'v2_retrain_25d.sh', V2/'cron/v2_retrain_25d.sh'),
     (SC/'v2_fetch_price.py', V2/'cron/v2_fetch_price.py'),
+    (SC/'v2_fusion_prefetch.py', V2/'cron/v2_fusion_prefetch.py'),
+    (SC/'v2_zip_autofetch.py', V2/'cron/v2_zip_autofetch.py'),
+    (SC/'v2_trade_crosscheck.py', V2/'cron/v2_trade_crosscheck.py'),
     (SC/'v2_single_stage.py', V2/'cron/v2_single_stage.py'),
     (SC/'v2_health_report.sh', V2/'cron/v2_health_report.sh'),
     (SC/'morning_report_watchdog.py', V2/'cron/morning_report_watchdog.py'),
@@ -137,6 +143,7 @@ for f in shs:
     print(('OK  ' if r.returncode == 0 else 'FAIL') + f' bash -n {f}')
 pys = [SC/'api_push.py', SC/'key_loader.py', SC/'pdf_report_generator.py',
        SC/'v2_fetch_price.py', SC/'v2_append_daily.py', SC/'v2_data_backup.py',
+       SC/'v2_fusion_prefetch.py', SC/'v2_zip_autofetch.py',
        SC/'morning_report_watchdog.py', V2/'v2_daily.py', V2/'retrain.py',
        V2/'v2_health_report.py', NEWS/'fetch_morning.py', NEWS/'fetch_afternoon.py',
        NEWS/'lib/formatter.py', GS/'gen_txt.py', GS/'gen_side_ds_pdf.py',
@@ -352,10 +359,15 @@ try:
                     _dead.append(_path)
                 _walk_keys(_v, _path, depth + 1)
         _walk_keys(_cfg, '', 1)
+        # 2026-09-11: 预留键豁免 — rule_timeline = P3 prod_replay(回测单点化)计划消费, 非死配置(六审共识)
+        _RESERVED = {'rule_timeline'}
+        _reserved = [p for p in _dead if p.split('.')[0] in _RESERVED]
+        _dead = [p for p in _dead if p.split('.')[0] not in _RESERVED]
         if _dead:
             print(f'⚠ {_cf} 疑似死配置(代码零引用): {_dead}')
         else:
-            print(f'OK  {_cf} 无死配置')
+            _rsv = f' (预留键: {_reserved})' if _reserved else ''
+            print(f'OK  {_cf} 无死配置{_rsv}')
 except Exception as _e13:
     print('ERR §13', str(_e13)[:120])
 
