@@ -4,8 +4,11 @@
 覆盖: v2运行时数据(含模型/归档/replay, 2026-09-11补) / 四川水情历史库 / hermes配置+记忆+skills / 原始数据归档 / 无git小项目代码
 - 无变化 → 静默退出0 (deliver=local, 不打扰)
 - 永不exit非0 (失败仅打印)
+- 2026-09-12修复: ①-ls-tree改-z解析(中文路径被转义bug) ②分块链式建树(>150KB POST必超时)
+  ③400/401等瞬时错误也重试 ④响应gzip(树清单563KB→90KB) ⑤单文件失败不拖垮整轮
 """
 import base64
+import gzip
 import json
 import os
 import shutil
@@ -79,13 +82,21 @@ def api(method, path, data=None, tries=3):
             url, data=body, method=method,
             headers={"Authorization": f"token {tok}",
                      "Content-Type": "application/json",
+                     "Accept-Encoding": "gzip",
                      "User-Agent": "hermes-push/1.0"})
         try:
             resp = urllib.request.urlopen(req, timeout=120)
-            return json.loads(resp.read().decode())
+            raw = resp.read()
+            # 2026-09-12修复: 接受gzip响应(树清单563KB→90KB, 减少大下载被截断)
+            if resp.headers.get("Content-Encoding") == "gzip":
+                raw = gzip.decompress(raw)
+            return json.loads(raw.decode())
         except urllib.error.HTTPError as e:
             last = RuntimeError(f"HTTP {e.code}: {e.read().decode()[:200]}")
-            if e.code >= 500 and i < tries - 1:
+            # 2026-09-12修复: 400 malformed / 401 Bad credentials / 422(瞬时timeout) 在本线路
+            # 为瞬时抖动(同请求重试即过, 实测), 一并退避重试; 5xx继续重试
+            if (e.code >= 500 or e.code in (400, 401, 403, 408, 422, 429)) \
+                    and i < tries - 1:
                 time.sleep(5 * (i + 1))
                 continue
             raise last
@@ -144,12 +155,25 @@ def main():
     rt = api("GET", f"git/trees/{bt}?recursive=1")["tree"]
     remote = {i["path"]: (i["sha"], i["mode"]) for i in rt if i["type"] == "blob"}
     local = {}
-    for line in sh(f"git ls-tree -r {lt}").split("\n"):
-        p = line.split(None, 3)
-        if len(p) >= 4 and p[1] == "blob":
-            local[p[3]] = (p[2], p[0])
+    # 2026-09-12修复: 原`git ls-tree`文本解析会把非ASCII路径的转义形态
+    # (引号+八进制, 如 "\345\256\236...") 原样当路径上传(中文名在远端变乱码条目);
+    # 改用 -z (NUL分隔, 永不转义)
+    rawz = subprocess.run(["git", "ls-tree", "-r", "-z", lt],
+                          capture_output=True, cwd=CWD).stdout
+    for ent in rawz.split(b"\0"):
+        if not ent:
+            continue
+        meta, _path = ent.split(b"\t", 1)
+        mode, typ, sha = meta.decode().split()
+        if typ == "blob":
+            local[_path.decode("utf-8")] = (sha, mode)
     changed = [p for p, (s, m) in local.items()
                if p not in remote or remote[p][0] != s]
+    # 2026-09-12: 内容一致、仅"远端多出历史遗留文件"时也正打此句(备份永不删远端文件;
+    # 该状态长期存在; 供审计守卫判成功)
+    if not changed:
+        print("远端已是最新, 跳过")
+        return
     # 断点续传+并发: 已成功上传的blob记录在.state, 重跑跳过; 8线程并发(串行1s/个太慢)
     state_path = os.path.join(CWD, ".upload_state.json")
     state = {}
@@ -163,6 +187,7 @@ def main():
     from concurrent.futures import ThreadPoolExecutor
     _lock = threading.Lock()
     _done = [0]
+    _failed = []
     _t0 = _time.time()
 
     def _up(p):
@@ -170,10 +195,16 @@ def main():
         with _lock:
             if state.get(p) == sha:
                 return
-        raw = subprocess.run(f"git cat-file -p {sha}",
-                             capture_output=True, shell=True, cwd=CWD).stdout
-        api("POST", "git/blobs", {"content": base64.b64encode(raw).decode(),
-                                  "encoding": "base64"})
+        try:
+            raw = subprocess.run(f"git cat-file -p {sha}",
+                                 capture_output=True, shell=True, cwd=CWD).stdout
+            api("POST", "git/blobs", {"content": base64.b64encode(raw).decode(),
+                                      "encoding": "base64"})
+        except Exception as e:
+            # 2026-09-12修复: 单文件失败不拖垮整轮, 记录后下轮补传
+            with _lock:
+                _failed.append((p, str(e)[:120]))
+            return
         with _lock:
             state[p] = sha
             with open(state_path, "w") as _sf:
@@ -187,12 +218,27 @@ def main():
         list(ex.map(_up, changed))
     print(f"  blob上传完成 {_done[0]}/{len(changed)} "
           f"耗时{_time.time() - _t0:.0f}s", flush=True)
-    # 2026-09-11: 增量建树(base_tree) — 全量entries在repo增长后必中GitHub
-    # "input too large, build tree incrementally"(09-07起422/400/504连续失败, 远端停在09-06)
+    if _failed:
+        print(f"  ⚠️ {len(_failed)}个文件本轮上传失败(下轮续传): "
+              f"{_failed[0][0][:60]} ...", flush=True)
+    # 2026-09-12修复: 只提交"已确认上传"的条目, 单文件失败不再阻塞建树提交
     changed_entries = [{"path": p, "mode": m, "type": "blob", "sha": s}
-                       for p, (s, m) in local.items() if p in changed]
-    new_tree = api("POST", "git/trees",
-                   {"base_tree": bt, "tree": changed_entries})["sha"]
+                       for p, (s, m) in local.items()
+                       if p in changed and state.get(p) == s]
+    if not changed_entries:
+        print(f"⚠️ {len(changed)}个变更未确认上传(全失败), 跳过建树提交; 下轮续传", flush=True)
+        return
+    # 2026-09-12修复: 分块链式建树 — 本线路对>150KB的POST约12s必超时(实测504/502),
+    # 全量一次必失败; 每批300条(~66KB, 实测秒过)
+    new_tree = bt
+    CHUNK = 300
+    for _i in range(0, len(changed_entries), CHUNK):
+        new_tree = api("POST", "git/trees",
+                       {"base_tree": new_tree,
+                        "tree": changed_entries[_i:_i + CHUNK]},
+                       tries=5)["sha"]
+        print(f"  建树进度 {min(_i + CHUNK, len(changed_entries))}/"
+              f"{len(changed_entries)}", flush=True)
     an = sh("git log --format=%an -1 HEAD")
     ae = sh("git log --format=%ae -1 HEAD")
     ad = sh("git log --format=%aI -1 HEAD")
@@ -204,7 +250,8 @@ def main():
     r = api("PATCH", f"git/refs/heads/{BRANCH}", {"sha": nc, "force": True})
     if os.path.exists(state_path):
         os.remove(state_path)  # 本轮完整成功, 清空断点状态
-    print(f"✅ 备份已推送 {len(changed)}文件 HEAD={r['object']['sha'][:8]}")
+    tail = f" (另有{len(_failed)}个下轮补传)" if _failed else ""
+    print(f"✅ 备份已推送 {len(changed_entries)}文件 HEAD={r['object']['sha'][:8]}{tail}")
 
 
 if __name__ == "__main__":
