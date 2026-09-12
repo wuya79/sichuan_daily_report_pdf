@@ -118,6 +118,11 @@ def check_d1_in_price():
                 # 2026-09-02守卫: 0元地板价真实存在(2026-08-30实测), 不再静默
                 warn = f'⚠️ D-1 {key}全天为0: 疑似污染或极端地板价, 请人工确认'
                 ok = False
+            bad = [(h, round(v, 1)) for h, v in enumerate(arr) if isinstance(v, (int, float)) and not (0 <= v <= 1500)]
+            if bad:
+                # 2026-09-12守卫: 重庆限价0-1500；越限值=退化特征
+                warn = f'⚠️ D-1 {key}存在越限值[0,1500]: {bad[:6]}'
+                ok = False
         return ok, warn
     return False, '价格库无D-1记录'
 

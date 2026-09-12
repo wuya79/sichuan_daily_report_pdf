@@ -36,6 +36,11 @@ def _is_complete(rec):
             # 2026-09-02守卫: 不再静默——0元地板价真实存在(2026-08-30实测), 提示人工确认
             print(f"⚠ {rec.get('date')} {key}全天为0: 疑似数据污染或极端地板价, 跳过写入, 请人工确认")
             return False
+        bad = [(h, round(v, 1)) for h, v in enumerate(arr) if not (0 <= v <= 1500)]
+        if bad:
+            # 2026-09-12守卫: 重庆限价0-1500；越限值=官方行退化特征(负值28格实证)，拒收待人工核实
+            print(f"⚠ {rec.get('date')} {key} 存在越限值[0,1500]: {bad[:6]} → 拒绝写入, 请人工核实")
+            return False
     return True
 
 
