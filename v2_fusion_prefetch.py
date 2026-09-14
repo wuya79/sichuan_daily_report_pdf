@@ -287,6 +287,7 @@ def main():
             latest = None
         if latest is None:
             out = fb  # 重读失败 → 退回旧行为(整写回)
+            log('  ! 写回前重读最新版失败 → 本次退回整写回(未合并)')
         else:
             for _ds, _field, _src in report['writes']:
                 _new = fb.get(_ds, {}).get(_field)
@@ -298,13 +299,14 @@ def main():
                     continue
                 _lday[_field] = _new
                 merged_n += 1
-            latest.setdefault('_meta', {})['fusion_prefetch'] = {
-                'at': datetime.now().isoformat(timespec='seconds'),
-                'writes': len(report['writes']),
-                'merged': merged_n,
-                'kept_latest': kept_n,
-            }
             out = latest
+        # 2026-09-14 F1(审计补修): meta 两路径统一刷新(含 fallback), 计数器随写回口径落盘
+        out.setdefault('_meta', {})['fusion_prefetch'] = {
+            'at': datetime.now().isoformat(timespec='seconds'),
+            'writes': len(report['writes']),
+            'merged': merged_n,
+            'kept_latest': kept_n,
+        }
         tmp = FB_PATH + '.tmp'
         with open(tmp, 'w') as f:
             json.dump(out, f, ensure_ascii=False)
