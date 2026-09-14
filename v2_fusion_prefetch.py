@@ -288,6 +288,7 @@ def main():
         if latest is None:
             out = fb  # 重读失败 → 退回旧行为(整写回)
             log('  ! 写回前重读最新版失败 → 本次退回整写回(未合并)')
+            print("⚠️ 融合预取: 写回前重读最新版失败 → 本次退回整写回(未合并)")
         else:
             for _ds, _field, _src in report['writes']:
                 _new = fb.get(_ds, {}).get(_field)
