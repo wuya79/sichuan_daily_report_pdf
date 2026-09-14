@@ -9,7 +9,7 @@
       --force-d8 YYYYMMDD   强制处理指定日期(绕过状态与目录占位)
       --backfill A [B]      历史区间回填(A~B含端点, 缺B=单日; 末尾统一重建fb并输出报告)
 """
-import json, os, re, shutil, subprocess, sys, time, urllib.error, urllib.request, zipfile
+import fcntl, json, os, re, shutil, subprocess, sys, time, urllib.error, urllib.request, zipfile
 from datetime import date, timedelta
 
 HOME = os.path.expanduser('~')
@@ -121,6 +121,12 @@ def rebuild_fb():
 def main():
     os.makedirs(ZIP_DIR, exist_ok=True)
     os.makedirs(EXT_DIR, exist_ok=True)
+    # 2026-09-14 非阻塞互斥: 排期加密后的自重叠保险(持锁失败=上一轮未结束→静默跳过)
+    _lk = open(os.path.join(os.path.dirname(STATE), 'zip_autofetch.lock'), 'w')
+    try:
+        fcntl.flock(_lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return
     st = _load_state()
     msgs = []
     if FORCE:

@@ -272,23 +272,48 @@ def main():
             commit_field(day, ds, field, merged, srcmap)
 
     # ---- 写入 ----
+    # 2026-09-14 竞态修复: 写回前重读最新版, 把本次提交逐项合并进去 — 期间其他写方
+    # (zip重建等)的新数据不再被内存快照整写回覆盖; 语义与 commit_field 的"不劣化"一致
+    merged_n = kept_n = 0
     if report['writes'] and not DRY:
         try:
             shutil.copy2(FB_PATH, FB_PATH + '.bak')
         except Exception:
             pass
-        meta['fusion_prefetch'] = {
-            'at': datetime.now().isoformat(timespec='seconds'),
-            'writes': len(report['writes']),
-        }
+        try:
+            with open(FB_PATH) as f_latest:
+                latest = json.load(f_latest)
+        except Exception:
+            latest = None
+        if latest is None:
+            out = fb  # 重读失败 → 退回旧行为(整写回)
+        else:
+            for _ds, _field, _src in report['writes']:
+                _new = fb.get(_ds, {}).get(_field)
+                if _new is None:
+                    continue
+                _lday = latest.setdefault(_ds, {})
+                if complete_list(_lday.get(_field)):
+                    kept_n += 1  # 最新版已有完整值(竞态期间他方写入) → 保留, 不覆盖
+                    continue
+                _lday[_field] = _new
+                merged_n += 1
+            latest.setdefault('_meta', {})['fusion_prefetch'] = {
+                'at': datetime.now().isoformat(timespec='seconds'),
+                'writes': len(report['writes']),
+                'merged': merged_n,
+                'kept_latest': kept_n,
+            }
+            out = latest
         tmp = FB_PATH + '.tmp'
         with open(tmp, 'w') as f:
-            json.dump(fb, f, ensure_ascii=False)
+            json.dump(out, f, ensure_ascii=False)
         os.replace(tmp, FB_PATH)
 
     dur = (datetime.now() - t0).total_seconds()
     log(f"run: writes={len(report['writes'])} conflicts={len(report['conflicts'])} "
-        f"revised={len(report['revised'])} identity={len(report['identity'])} dry={DRY} dur={dur:.1f}s")
+        f"revised={len(report['revised'])} identity={len(report['identity'])} "
+        f"merged={merged_n} kept_latest={kept_n} dry={DRY} dur={dur:.1f}s")
     for it in report['writes']:
         log(f"  + {it[0]} {it[1]} <- {it[2]}")
     for it in report['conflicts'][:10]:
