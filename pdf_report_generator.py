@@ -399,24 +399,27 @@ def validate_data_integrity(html: str, report_text: str):
     hard集=4个关键指标必须出现; soft集=txt中所有"数字+单位"覆盖率≥85%
     Returns: (ok, missing_hard, coverage_ratio)
     """
+    # 2026-09-16 修复误报（09-13 变更清单已批）: txt 与 html 均去千分位逗号; html 再去标签
+    rt = report_text.replace(',', '')
+    hn = re.sub(r'<[^>]+>', ' ', html).replace(',', '')
     hard_pat = {
         '均价': (r'昨日均价\s*(\d+(?:\.\d+)?)\s*元', r'{v}\s*元'),
-        '净缺口': (r'净缺口\s*(-?\d+(?:\.\d+)?)\s*MW', r'{v}\s*MW'),
+        '净缺口': (r'净缺口\s*([+-]?\d+(?:\.\d+)?)\s*MW', r'{v}\s*MW'),
         '水电占比': (r'水电\s*(\d+(?:\.\d+)?)\s*%', r'{v}\s*%'),
         '负载率': (r'火电负载率\s*(\d+(?:\.\d+)?)\s*%', r'{v}\s*%'),
     }
     missing = []
     for name, (pat, unit_pat) in hard_pat.items():
-        m = re.search(pat, report_text)
+        m = re.search(pat, rt)
         if m is None:
             log.warning(f"  [校验] txt中未找到{name}字段(格式可能变化), 计入缺失防静默失效")
             missing.append(name)
             continue
-        if not re.search(unit_pat.format(v=re.escape(m.group(1).lstrip('-'))), html):
+        if not re.search(unit_pat.format(v=re.escape(m.group(1).lstrip('-+'))), hn):
             missing.append(name)
-    nums = re.findall(r'(\d+(?:\.\d+)?)\s*(?:元|MW|%)', report_text)
+    nums = re.findall(r'(\d+(?:\.\d+)?)\s*(?:元|MW|%)', rt)
     nums = [n.lstrip('-') for n in nums]
-    ratio = sum(1 for n in nums if n in html) / len(nums) if nums else 1.0
+    ratio = sum(1 for n in nums if n in hn) / len(nums) if nums else 1.0
     return (len(missing) == 0 and ratio >= 0.85), missing, ratio
 
 

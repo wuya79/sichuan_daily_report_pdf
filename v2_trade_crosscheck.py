@@ -202,32 +202,34 @@ def main():
                 print(f"    ⚠ trade:{e}")
 
     # ── 交易口状态机（2026-09-17 增）: 故障开始/恢复各播1条, 持续期间静默; 首跑仅建基线不播 ──
+    # 2026-09-16 收口: 手动 --date 跑仅查数, 不触发状态机（防对历史日期误报"故障开始"）
     trans_msgs = []
-    newest = dates[0]
-    down = bool(day_trade_errs.get(newest))
-    today_s = today.isoformat()
-    to = state.get("trade_outage")
-    boot = to is None
-    if to is None:
-        to = {"active": False, "since": None, "last_change": None}
-    if down and not to["active"]:
-        to.update(active=True, since=today_s, last_change=today_s)
-        if not boot:
-            trans_msgs.append("⚠️ 交易口取数异常（故障开始）: 窗口交易侧失败 " 
-                              + ", ".join(sorted(set(day_trade_errs.get(newest, []))))
-                              + " ; 持续期间静默, 恢复时播报(数值核验照常)")
-    elif (not down) and to["active"]:
-        _since = to.get("since") or "?"
-        try:
-            _dur = (today - _date.fromisoformat(_since)).days + 1
-        except Exception:
-            _dur = "?"
-        to.update(active=False, last_change=today_s)
-        trans_msgs.append(f"✅ 交易口已恢复: 首个成功日 {today_s}; 故障期 {_since}~{today_s}（共{_dur}天）")
-        trans_msgs.append("提示: 故障期各日将随回填自动核验(不一致照常播报); 连续2日正常后可恢复 data_sources.order 三源序(人工确认)")
-    elif boot:
-        to.update(active=down, since=today_s if down else None, last_change=today_s)
-    state["trade_outage"] = to
+    if d is None:
+        newest = dates[0]
+        down = bool(day_trade_errs.get(newest))
+        today_s = today.isoformat()
+        to = state.get("trade_outage")
+        boot = to is None
+        if to is None:
+            to = {"active": False, "since": None, "last_change": None}
+        if down and not to["active"]:
+            to.update(active=True, since=today_s, last_change=today_s)
+            if not boot:
+                trans_msgs.append("⚠️ 交易口取数异常（故障开始）: 窗口交易侧失败 " 
+                                  + ", ".join(sorted(set(day_trade_errs.get(newest, []))))
+                                  + " ; 持续期间静默, 恢复时播报(数值核验照常)")
+        elif (not down) and to["active"]:
+            _since = to.get("since") or "?"
+            try:
+                _dur = (today - _date.fromisoformat(_since)).days + 1
+            except Exception:
+                _dur = "?"
+            to.update(active=False, last_change=today_s)
+            trans_msgs.append(f"✅ 交易口已恢复: 首个成功日 {today_s}; 故障期 {_since}~{today_s}（共{_dur}天）")
+            trans_msgs.append("提示: 故障期各日将随回填自动核验(不一致照常播报); 连续2日正常后可恢复 data_sources.order 三源序(人工确认)")
+        elif boot:
+            to.update(active=down, since=today_s if down else None, last_change=today_s)
+        state["trade_outage"] = to
 
     state["last_run"] = datetime.now().isoformat(timespec='seconds')
     keep = sorted(state["days"])[-60:]

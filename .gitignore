@@ -1,3 +1,10 @@
 .kimi_key
 __pycache__/
 *.pyc
+# 2026-09-16 防护: 运行态/回滚链文件不入库（靠手工显式 add 管理，防 git add -A 误提交）
+.wx_guard_state.json
+oss_probe_state.json
+zip_autofetch.lock
+zip_autofetch_state.json
+.probe_sc_timing_*.jsonl
+*.bak*
