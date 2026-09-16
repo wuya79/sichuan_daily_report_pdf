@@ -60,12 +60,23 @@ rt = api("GET", f"git/trees/{bt}?recursive=1")["tree"]
 remote = {i["path"]: (i["sha"], i["mode"]) for i in rt if i["type"] == "blob"}
 lt = sh("git rev-parse HEAD^{tree}")
 local = {}
-for line in sh(f"git ls-tree -r {lt}").split("\n"):
-    p = line.split(None, 3)
-    if len(p) >= 4 and p[1] == "blob":
-        local[p[3]] = (p[2], p[0])  # sha, mode
+# 2026-09-16修复: 原 `git ls-tree` 文本解析会把非ASCII路径的转义形态(引号+八进制)
+# 原样当路径 → 远端中文名变乱码条目; 改用 -z (NUL分隔, 永不转义)
+rawz = subprocess.run(["git", "ls-tree", "-r", "-z", lt],
+                      capture_output=True, cwd=CWD).stdout
+for ent in rawz.split(b"\0"):
+    if not ent:
+        continue
+    meta, _path = ent.split(b"\t", 1)
+    mode, typ, sha = meta.decode().split()
+    if typ == "blob":
+        local[_path.decode("utf-8")] = (sha, mode)  # sha, mode
+if not local:  # 保险(2026-09-16): 空解析=灾难级误写, 直接abort
+    sys.exit("本地tree解析为空, abort")
 changed = [p for p, (s, m) in local.items()
            if p not in remote or remote[p][0] != s]
+if len(changed) > 150:  # 保险: 异常大变更=解析错误特征(正常增量推送远小于此)
+    sys.exit(f"变更文件数异常({len(changed)}), abort")
 print(f"{REPO}: 远程{base[:8]} 文件{len(remote)} 本地{len(local)} 需上传{len(changed)}")
 
 for i, p in enumerate(changed):
