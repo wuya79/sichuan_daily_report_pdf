@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-V2单stage编排 — v1.2 (2026-08-21, 极简版)
+V2单stage编排 — v1.2 (2026-08-21, 极简版) → v1.3 (2026-09-16, +D-1晚到重试)
 09:24 cron唯一入口: fetch → 特征表重建 → 35d训练 → 全量训练 → 推理出策略
 设计哲学(同旧v2_daily.sh): 每步一个固定大墙(纯防挂死), 无绝对时刻/无模式判断/无让路点
   - 纯编排: retrain.py / v2_daily.py / v2_fetch_price.py 零修改, 原样调用
@@ -40,6 +40,8 @@ WALLS = {  # 固定大墙(秒), 纯防挂死
     'send_csv': 90,
 }
 FEAT_MIN_ROWS = 5000  # 特征表完整性: 最小行数
+D1_RETRY_N = 2       # D-1晚到重试次数(2026-09-16): 上游偶发晚于09:24发布
+D1_RETRY_WAIT = 45   # 每次重试前等待秒数; 总等待≤90s; 成功日零开销
 
 
 def log(msg):
@@ -178,12 +180,19 @@ def main():
     warns = []
     log(f'═══ v2_single_stage 启动 {datetime.now():%Y-%m-%d %H:%M:%S} ═══')
 
-    # ── 1. fetch价格 ──
+    # ── 1. fetch价格 (v1.3: D-1晚到重试 — 未完整→等45s再补, 最多2轮/总等待≤90s) ──
     rc, out = run_step(f'python3 {FETCH}', WALLS['fetch'], 'fetch价格')
-    if rc != 0:
-        warns.append('⚠️ 价格补拉失败/超时, 特征表将不含D-1(同现状)')
     _ok, _warn = check_d1_in_price()
+    for _att in range(1, D1_RETRY_N + 1):
+        if _ok:
+            break
+        log(f'   D-1未完整, 等{D1_RETRY_WAIT}s重试({_att}/{D1_RETRY_N})')
+        time.sleep(D1_RETRY_WAIT)
+        rc, out = run_step(f'python3 {FETCH}', WALLS['fetch'], f'fetch价格重试{_att}')
+        _ok, _warn = check_d1_in_price()
     log(f'   价格库D-1完整: {_ok}')
+    if rc != 0 and not _ok:
+        warns.append('⚠️ 价格补拉失败/超时, 特征表将不含D-1(同现状)')
     if _warn:
         warns.append(_warn)
 
