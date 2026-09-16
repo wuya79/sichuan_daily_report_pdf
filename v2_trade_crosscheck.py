@@ -8,6 +8,8 @@
 设计：
 - 默认扫描最近4天（D-1~D-4，捕捉迟到补发布）；--date 指定单日
 - 无异常时零输出（cron no_agent 模式=静默）；有异常时输出到 stdout（会被投递）
+- 播报策略(2026-09-17 起)：交易侧取数失败走"状态机"——故障首日播1条 / 持续期间静默 /
+  恢复播1条；升级后首跑仅建基线不播。数值不一致、rt超阈值、系统侧取数异常 仍按日播报(按日期去重)
 - 状态累积：/home/ubuntu/v2_cq_strategy/output/trade_crosscheck_state.json
 - 阈值：实际值 diff>0.01 告警；rt max差>5.0 告警（正常日已知≤2.3）
 - 用法: v2_trade_crosscheck.py [--date 2026-09-09] [--verbose] [--report]
@@ -99,15 +101,15 @@ def trade_t12_rt(ds):
 
 
 def check_day(ds):
-    res = {"checked_at": datetime.now().isoformat(timespec='seconds'), "items": {}, "alerts": []}
-    errs = []
+    res = {"checked_at": datetime.now().isoformat(timespec='seconds'),
+           "items": {}, "alerts": [], "sys_errs": [], "trade_errs": []}
     for name, (sd, td) in ACTUAL_MAP.items():
         a, _, ea = system_data(sd, ds)
         b, eb = trade_actual(td, ds)
         if ea:
-            errs.append(f"{name}:{ea}")
+            res["sys_errs"].append(f"{name}:{ea}")
         if eb:
-            errs.append(f"{name}:{eb}")
+            res["trade_errs"].append(f"{name}:{eb}")
         if a and b:
             common = set(a) & set(b)
             nd = sum(1 for m in common if abs(a[m] - b[m]) > ACT_DIFF_ALERT)
@@ -127,9 +129,9 @@ def check_day(ds):
     a, rows_a, ea = system_data(2, ds)
     b, eb = trade_t12_rt(ds)
     if ea:
-        errs.append(f"rt:{ea}")
+        res["sys_errs"].append(f"rt:{ea}")
     if eb:
-        errs.append(f"rt:{eb}")
+        res["trade_errs"].append(f"rt:{eb}")
     if a and b:
         common = set(a) & set(b)
         mx = max((abs(a[m] - b[m]) for m in common), default=0.0)
@@ -142,8 +144,9 @@ def check_day(ds):
         res["items"]["rt"] = "trade缺"
     else:
         res["items"]["rt"] = "双缺"
-    if errs:
-        res["alerts"].append(f"{ds} 取数异常: {', '.join(sorted(set(errs)))}")
+    if res["sys_errs"]:
+        res["alerts"].append(f"{ds} 系统取数异常: {', '.join(sorted(set(res['sys_errs'])))}")
+    # 2026-09-17: 交易侧取数失败不再按日播报 — 由 main() 的交易口状态机统一处理
     return res
 
 
@@ -169,14 +172,18 @@ def main():
         for k in sorted(state["days"])[-14:]:
             it = state["days"][k]["items"]
             print(f"{k} | " + " | ".join(it.get(x, "-") for x in ("gen", "load", "hydro", "nonmkt", "rt")))
+        _to = state.get("trade_outage") or {}
+        print(f"交易口状态: {'故障中(自 ' + str(_to.get('since')) + ')' if _to.get('active') else '正常'}")
         return
 
     today = _date.today()
     dates = [d] if d else [(today - timedelta(days=i)).isoformat() for i in range(1, 5)]
 
     new_alerts = []
+    day_trade_errs = {}
     for ds in dates:
         res = check_day(ds)
+        day_trade_errs[ds] = res["trade_errs"]
         old = state["days"].get(ds, {})
         old_alerts = old.get("alerts", [])
         for a in res["alerts"]:
@@ -191,6 +198,36 @@ def main():
             print(f"[{ds}] " + " | ".join(f"{k}={v}" for k, v in res["items"].items()))
             for a in res["alerts"]:
                 print(f"    ⚠ {a}")
+            for e in res["trade_errs"]:
+                print(f"    ⚠ trade:{e}")
+
+    # ── 交易口状态机（2026-09-17 增）: 故障开始/恢复各播1条, 持续期间静默; 首跑仅建基线不播 ──
+    trans_msgs = []
+    newest = dates[0]
+    down = bool(day_trade_errs.get(newest))
+    today_s = today.isoformat()
+    to = state.get("trade_outage")
+    boot = to is None
+    if to is None:
+        to = {"active": False, "since": None, "last_change": None}
+    if down and not to["active"]:
+        to.update(active=True, since=today_s, last_change=today_s)
+        if not boot:
+            trans_msgs.append("⚠️ 交易口取数异常（故障开始）: 窗口交易侧失败 " 
+                              + ", ".join(sorted(set(day_trade_errs.get(newest, []))))
+                              + " ; 持续期间静默, 恢复时播报(数值核验照常)")
+    elif (not down) and to["active"]:
+        _since = to.get("since") or "?"
+        try:
+            _dur = (today - _date.fromisoformat(_since)).days + 1
+        except Exception:
+            _dur = "?"
+        to.update(active=False, last_change=today_s)
+        trans_msgs.append(f"✅ 交易口已恢复: 首个成功日 {today_s}; 故障期 {_since}~{today_s}（共{_dur}天）")
+        trans_msgs.append("提示: 故障期各日将随回填自动核验(不一致照常播报); 连续2日正常后可恢复 data_sources.order 三源序(人工确认)")
+    elif boot:
+        to.update(active=down, since=today_s if down else None, last_change=today_s)
+    state["trade_outage"] = to
 
     state["last_run"] = datetime.now().isoformat(timespec='seconds')
     keep = sorted(state["days"])[-60:]
@@ -201,8 +238,10 @@ def main():
         json.dump(state, f, ensure_ascii=False, indent=1)
     os.replace(tmp, STATE)
 
-    if new_alerts:
+    if trans_msgs or new_alerts:
         print("⚠️ 交易接口交叉校验告警：")
+        for m in trans_msgs:
+            print(f"- {m}")
         for a in new_alerts:
             print(f"- {a}")
         print("(详见 output/trade_crosscheck_state.json)")
