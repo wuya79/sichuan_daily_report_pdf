@@ -400,23 +400,56 @@ def validate_data_integrity(html: str, report_text: str):
     Returns: (ok, missing_hard, coverage_ratio)
     """
     # 2026-09-16 修复误报（09-13 变更清单已批）: txt 与 html 均去千分位逗号; html 再去标签
-    rt = report_text.replace(',', '')
-    hn = re.sub(r'<[^>]+>', ' ', html).replace(',', '')
+    rt = report_text.replace(',', '').replace('％', '%')
+    hn_diag = re.sub(r'<[^>]+>', ' ', html)  # 诊断用: 仅去标签(保留实体原样)
+    hn = hn_diag.replace(',', '')
+    # 2026-09-23 增强归一化("水电占比"复发误报修复): HTML实体解码 + 全角％/NBSP/零宽字符/unicode减号归一
+    try:
+        from html import unescape as _unescape
+        hn = _unescape(hn)
+    except Exception:
+        pass
+    for _a, _b in (('％', '%'), ('\u00a0', ' '), ('\u200b', ''), ('\ufeff', ''), ('\u2212', '-')):
+        hn = hn.replace(_a, _b)
+    # 2026-09-23 候选值组: 同一指标txt中可能有两种合法表述（如"水电105%"摘要 与 "水电41371MW (104.6%)"水情行），
+    #             Kimi两种都可能采用 → 任一命中即通过（仍为数字级比对，不弱化为关键词检查）
     hard_pat = {
-        '均价': (r'昨日均价\s*(\d+(?:\.\d+)?)\s*元', r'{v}\s*元'),
-        '净缺口': (r'净缺口\s*([+-]?\d+(?:\.\d+)?)\s*MW', r'{v}\s*MW'),
-        '水电占比': (r'水电\s*(\d+(?:\.\d+)?)\s*%', r'{v}\s*%'),
-        '负载率': (r'火电负载率\s*(\d+(?:\.\d+)?)\s*%', r'{v}\s*%'),
+        '均价': [(r'昨日均价\s*(\d+(?:\.\d+)?)\s*元', r'{v}(?:\.0+)?\s*元')],
+        '净缺口': [(r'净缺口\s*([+-]?\d+(?:\.\d+)?)\s*MW', r'{v}(?:\.0+)?\s*MW')],
+        '水电占比': [
+            (r'水电\s*(\d+(?:\.\d+)?)\s*%', r'{v}(?:\.0+)?\s*%'),
+            (r'水电\s*\d+\s*MW\s*[（(]\s*(\d+(?:\.\d+)?)\s*%', r'{v}(?:\.0+)?\s*%'),
+        ],
+        '负载率': [(r'火电负载率\s*(\d+(?:\.\d+)?)\s*%', r'{v}(?:\.0+)?\s*%')],
     }
     missing = []
-    for name, (pat, unit_pat) in hard_pat.items():
-        m = re.search(pat, rt)
-        if m is None:
-            log.warning(f"  [校验] txt中未找到{name}字段(格式可能变化), 计入缺失防静默失效")
-            missing.append(name)
+    for name, pats in hard_pat.items():
+        _hit = False
+        _tried, _txt_found = [], False
+        for _pat, _unit_pat in pats:
+            _m = re.search(_pat, rt)
+            if _m is None:
+                continue
+            _txt_found = True
+            _v_raw = _m.group(1)
+            _v_core = _v_raw.lstrip('-+')
+            _v_core = _v_core.rstrip('0').rstrip('.') if '.' in _v_core else _v_core
+            _tried.append(_v_raw)
+            if re.search(_unit_pat.format(v=re.escape(_v_core)), hn):
+                _hit = True
+                break
+        if _hit:
             continue
-        if not re.search(unit_pat.format(v=re.escape(m.group(1).lstrip('-+'))), hn):
-            missing.append(name)
+        if not _txt_found:
+            log.warning(f"  [校验] txt中未找到{name}字段(格式可能变化), 计入缺失防静默失效")
+        else:
+            _snips = []
+            for _v in _tried:
+                _pp = hn_diag.find(_v.lstrip('-+'))
+                if _pp >= 0:
+                    _snips.append(hn_diag[max(0, _pp - 25):_pp + len(_v) + 25].replace('\n', ' '))
+            log.warning(f"  [校验] {name}: txt候选值={_tried} 均未通过html单位检查; 片段={_snips!r}")
+        missing.append(name)
     nums = re.findall(r'(\d+(?:\.\d+)?)\s*(?:元|MW|%)', rt)
     nums = [n.lstrip('-') for n in nums]
     ratio = sum(1 for n in nums if n in hn) / len(nums) if nums else 1.0
