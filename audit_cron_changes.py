@@ -147,7 +147,7 @@ pys = [SC/'api_push.py', SC/'key_loader.py', SC/'pdf_report_generator.py',
        SC/'morning_report_watchdog.py', V2/'v2_daily.py', V2/'retrain.py',
        V2/'v2_health_report.py', NEWS/'fetch_morning.py', NEWS/'fetch_afternoon.py',
        NEWS/'lib/formatter.py', GS/'gen_txt.py', GS/'gen_side_ds_pdf.py',
-       SH/'scripts/cq_monthly/daily_signal.py']
+       SH/'scripts/cq_monthly/daily_signal.py', SC/'audit_daily_values.py']
 for f in pys:
     if not f.exists():
         continue

@@ -6,6 +6,8 @@ v1 (2026-09-23): 由来=当日两日报数值终审的53项固化为每日自动
                  挂 audit_cron_guard.sh 第13项(每日16:00)。检查原理:
                  从原始数据源(快照/趋势库/价格库/月内档案/水情缓存/因子历史)
                  独立重算, 与报告"显示值"逐项比对。不核上游源数据自身正确性。
+v1.1 (2026-09-23): +H组PDF层抽查(存在/新鲜/关键值锚点) + 历史模式FAIL自动降级
+                   + 适配gen"瀑布沟"站名修复后的蓄水行格式
 
 用法: python3 audit_daily_values.py [--date YYYY-MM-DD]     # 默认今天
 退出码: 0=无❌(可含⚠️); 1=存在❌数值不一致或产物缺失
@@ -24,6 +26,7 @@ sys.dont_write_bytecode = True  # 保持"零写IO"审计承诺
 import argparse
 import json
 import re
+import subprocess
 from datetime import date as _date, datetime, timedelta
 from pathlib import Path
 
@@ -606,8 +609,8 @@ def main():
                     f('G4a 瀑布沟(水位/库容)', f'{mb.group(1)}m / {mb.group(2)}%', f'{calc_lvl}m / {calc_cap}%')
             else:
                 w('G4a 瀑布沟', '解析不到或缓存缺站')
-            # G4b 瀑布沟 蓄水行(delta)
-            mbs = re.search(r'^→ 蓄水 \+([\d.]+)万m³ 占调节库容(\d+)% 水位([+-][\d.]+)m', gen, re.M)
+            # G4b 瀑布沟 蓄水行(delta) — 2026-09-23起gen已修复站名, 按带名格式匹配
+            mbs = re.search(r'^瀑布沟\s+→ 蓄水 \+([\d.]+)万m³ 占调节库容(\d+)% 水位([+-][\d.]+)m', gen, re.M)
             if mbs and bf and prev and '瀑布沟' in prev:
                 pv = prev['瀑布沟']
                 d_xsl = float(bf['蓄水量']) - float(pv['蓄水量'])
@@ -798,6 +801,92 @@ def main():
                     f('G15 滚动加权均价', f'{mg15.group(1)}', f'{round(wavg)}')
         else:
             w('G15 滚动加权均价', '解析不到')
+
+    # ════════ H PDF层抽查 ════════
+    sec('H PDF层抽查')
+    sell_pdf = RP / 'pdf' / f'daily_{dt.strftime("%Y%m%d")}.pdf'
+    gen_pdf = RP / 'gen_side' / f'gen_side_{dt.strftime("%Y%m%d")}.pdf'
+    for tag, pp in [('H1 售电PDF', sell_pdf), ('H2 发电PDF', gen_pdf)]:
+        if not pp.exists():
+            f(tag, '文件不存在', str(pp))
+        else:
+            st_ = pp.stat()
+            mt = datetime.fromtimestamp(st_.st_mtime)
+            if is_today and mt.date() != dt:
+                f(tag, f'未当日更新(mtime {mt:%m-%d %H:%M})', '应为当日')
+            elif st_.st_size < 100_000:
+                f(tag, f'体积异常({st_.st_size}B)', '应>100KB')
+            else:
+                s(tag, f'存在({mt:%m-%d %H:%M}, {st_.st_size}B)', '新鲜')
+
+    def _h_norm(x):
+        x = (x or '').replace('−', '-').replace('–', '-').replace('—', '-').replace('％', '%')
+        return re.sub(r'[\s,，]', '', x)
+
+    def _h_pdftext(pp):
+        try:
+            r_ = subprocess.run(['pdftotext', '-layout', str(pp), '-'],
+                                capture_output=True, text=True, timeout=120)
+            return r_.stdout if r_.returncode == 0 else None
+        except Exception:
+            return None
+
+    def _h_anchors(src_text):
+        """从报告文本抽当日关键值(自包含重解析, 不依赖前文状态)"""
+        out = []
+
+        def put(v):
+            if v is None:
+                return
+            v = str(v)
+            if len(v) >= 3 and v not in out:
+                out.append(v)
+        if src_text:
+            mm = re.search(r'总可用[:：]?\s*([\d,]+)MW', src_text); put(mm and mm.group(1))
+            mm = re.search(r'净缺口[:：]?\s*(-?[\d,]+)MW', src_text); put(mm and mm.group(1).lstrip('-').strip())
+            for mm in re.finditer(r'成交(\d+)MW', src_text): put(mm.group(1))
+            mm = re.search(r'水电[\d,]+MW\s*\(([\d.]+)%\)', src_text); put(mm and mm.group(1))
+            mm = re.search(r'次日电价[↑↓]([\d.]+)%', src_text); put(mm and mm.group(1))
+            mm = re.search(r'偏空比例\s*(\d+)%', src_text); put(mm and (mm.group(1) + '%'))
+            mm = re.search(r'高(\d+) 低(-?\d+)', src_text); put(mm and mm.group(1)); put(mm and mm.group(2))
+            mm = re.search(r'综合来水指数[:：]\s*(0\.\d+)', src_text); put(mm and mm.group(1))
+            mm = re.search(r'水位([\d.]+)\s+距汛限', src_text); put(mm and mm.group(1))
+            for mm in re.finditer(r'蓄水 \+([\d.]+)万m³', src_text): put(mm.group(1))
+            mm = re.search(r'火电开机参考\s*([\d,]+) MW', src_text); put(mm and mm.group(1))
+            mm = re.search(r'停机 \d+台/([\d,]+) MW', src_text); put(mm and mm.group(1))
+            mm = re.search(r'火电利用率(\d+)%', src_text); put(mm and (mm.group(1) + '%'))
+            mm = re.search(r'月度交易价格\s+(\d+) 元/MWh\s+升水\+(\d+)元', src_text)
+            if mm:
+                put(mm.group(1)); put(mm.group(2))
+        return out
+
+    for tag, pp, txt_src in [('H3 售电PDF锚点', sell_pdf, sell), ('H4 发电PDF锚点', gen_pdf, gen)]:
+        anchors = _h_anchors(txt_src)
+        if not anchors:
+            w(tag, '无锚点(报告文本缺失)')
+            continue
+        if not pp.exists():
+            w(tag, 'PDF缺失, 跳过锚点')
+            continue
+        body = _h_pdftext(pp)
+        if body is None:
+            w(tag, 'pdftotext不可用/失败')
+            continue
+        nb = _h_norm(body)
+        miss = [a for a in anchors if _h_norm(a) not in nb]
+        if not miss:
+            s(tag, f'{len(anchors)}/{len(anchors)} 命中', ' '.join(anchors)[:80])
+        elif len(miss) == 1:
+            w(tag, f'疑似抽取缺漏: {miss[0]}', f'命中 {len(anchors)-1}/{len(anchors)}')
+        else:
+            f(tag, f'缺{len(miss)}项: {miss[:5]}', f'命中 {len(anchors)-len(miss)}/{len(anchors)}')
+
+    # 历史日期模式: ❌统一降级为⚠️(源数据为当前态, 非点位快照)
+    if not is_today:
+        for i, item in enumerate(RES):
+            if item[0] == 'FAIL':
+                _lv, _t, _d, _c, _n = item
+                RES[i] = ('WARN', _t, _d, '', (_n + '；' if _n else '') + '历史模式降级(源非点位快照)')
 
     # ════════ 输出 ════════
     print(f'数值与计算审计 {D}（独立重算，只读）')
