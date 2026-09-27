@@ -867,7 +867,8 @@ def main():
             mm = re.search(r'火电开机参考\s*([\d,]+) MW', src_text); put(mm and mm.group(1))
             mm = re.search(r'停机 \d+台/([\d,]+) MW', src_text); put(mm and mm.group(1))
             mm = re.search(r'火电利用率(\d+)%', src_text); put(mm and (mm.group(1) + '%'))
-            mm = re.search(r'月度交易价格\s+(\d+) 元/MWh\s+升水\+(\d+)元', src_text)
+            # 2026-09-27 v1.2.2：兼容"贴水-"（旧版只认"升水+"，贴水日少抽锚点）；空白[ \t]+防跨行
+            mm = re.search(r'月度交易价格[ \t]+(\d+)[ \t]元/MWh[ \t]+(?:升水\+|贴水-)(\d+)元', src_text)
             if mm:
                 put(mm.group(1)); put(mm.group(2))
         return out
