@@ -667,18 +667,26 @@ def main():
             monthly_f = sum(prices) / len(prices) if prices else None
         except Exception:
             pass
-        # 2026-09-27：兼容"贴水N元"（旧版只认"升水"，贴水行漏检=盲区）；价差比较给±1容差
-        # （显示按取整整数相减、与浮点重算可差1；09-26月度案例 43 vs 42 即此）
-        mg6 = re.search(r'滚动D\+2~D\+4\s+(\d+) 元/MWh\s+(?:升水|贴水)([+-]\d+)元', gen)
-        mg6m = re.search(r'月度交易价格\s+(\d+) 元/MWh\s+(?:升水|贴水)([+-]\d+)元', gen)
-        mg6s = re.search(r'现货（昨日）\s+(\d+) 元/MWh', gen)
+        # 2026-09-27 v1.2.1：兼容"贴水N元"/零值"持平"（旧版只认"升水"=盲区）；价差比较±1；
+        # 空白改[ \t]+防跨行桥接（自审实测：\s+ 可跨行误配；生成端单行成文，属加固）
+        mg6 = re.search(r'滚动D\+2~D\+4[ \t]+(\d+)[ \t]元/MWh[ \t]+(?:升水|贴水)([+-]\d+)元', gen)
+        mg6m = re.search(r'月度交易价格[ \t]+(\d+)[ \t]元/MWh[ \t]+(?:升水|贴水)([+-]\d+)元', gen)
+        mg6f = re.search(r'滚动D\+2~D\+4[ \t]+(\d+)[ \t]元/MWh[ \t]+持平', gen)
+        mg6mf = re.search(r'月度交易价格[ \t]+(\d+)[ \t]元/MWh[ \t]+持平', gen)
+        mg6s = re.search(r'现货（昨日）[ \t]+(\d+)[ \t]元/MWh', gen)
         items_ok, items_bad = [], []
         if mg6 and roll_f is not None and spot is not None:
             okk = (abs(int(mg6.group(1)) - round(roll_f)) <= 1 and abs(int(mg6.group(2)) - round(roll_f - spot)) <= 1)
             (items_ok if okk else items_bad).append(f'滚动{mg6.group(1)}/{mg6.group(2)}')
+        elif mg6f and roll_f is not None and spot is not None:
+            okk = (abs(int(mg6f.group(1)) - round(roll_f)) <= 1 and abs(round(roll_f - spot)) <= 1)
+            (items_ok if okk else items_bad).append(f'滚动{mg6f.group(1)}/持平')
         if mg6m and monthly_f is not None and spot is not None:
             okk = (abs(int(mg6m.group(1)) - round(monthly_f)) <= 1 and abs(int(mg6m.group(2)) - round(monthly_f - spot)) <= 1)
             (items_ok if okk else items_bad).append(f'月度{mg6m.group(1)}/{mg6m.group(2)}')
+        elif mg6mf and monthly_f is not None and spot is not None:
+            okk = (abs(int(mg6mf.group(1)) - round(monthly_f)) <= 1 and abs(round(monthly_f - spot)) <= 1)
+            (items_ok if okk else items_bad).append(f'月度{mg6mf.group(1)}/持平')
         if mg6s and spot is not None:
             okk = int(mg6s.group(1)) == round(spot)
             (items_ok if okk else items_bad).append(f'现货{mg6s.group(1)}')
