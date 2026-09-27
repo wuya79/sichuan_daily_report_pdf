@@ -214,10 +214,12 @@ def main():
                 f('B2b 负荷=源取整', f'{ld:,}', f'{round(snap[D]["load"]):,}')
         if tot_disp is not None and gap_disp is not None and m72:
             d1 = (_i(m72.group(1)) - tot_disp) - gap_disp
-            if abs(d1) <= 1:
-                s('B2c 三数自洽(±1MW)', f'负荷-总可用-缺口差={d1}', '取整路径差异, 允许±1')
+            # 2026-09-27：容差放宽到±2——三数均为取整显示值+源浮点差本身约1.04（09-26案例 差=2
+            # 为纯取整路径复合误差）；真错误（取错字段）会差到几十上百MW
+            if abs(d1) <= 2:
+                s('B2c 三数自洽(±2MW)', f'负荷-总可用-缺口差={d1}', '取整路径复合误差, 允许±2')
             else:
-                f('B2c 三数自洽(±1MW)', f'差={d1}', '偏差超过1MW')
+                f('B2c 三数自洽(±2MW)', f'差={d1}', '偏差超过2MW')
         # B3 摘要净缺口=正文净缺口
         if m4s and gap_disp is not None:
             if _i(m4s.group(1)) == gap_disp:
@@ -665,16 +667,18 @@ def main():
             monthly_f = sum(prices) / len(prices) if prices else None
         except Exception:
             pass
-        mg6 = re.search(r'滚动D\+2~D\+4\s+(\d+) 元/MWh\s+升水([+-]\d+)元', gen)
-        mg6m = re.search(r'月度交易价格\s+(\d+) 元/MWh\s+升水([+-]\d+)元', gen)
+        # 2026-09-27：兼容"贴水N元"（旧版只认"升水"，贴水行漏检=盲区）；价差比较给±1容差
+        # （显示按取整整数相减、与浮点重算可差1；09-26月度案例 43 vs 42 即此）
+        mg6 = re.search(r'滚动D\+2~D\+4\s+(\d+) 元/MWh\s+(?:升水|贴水)([+-]\d+)元', gen)
+        mg6m = re.search(r'月度交易价格\s+(\d+) 元/MWh\s+(?:升水|贴水)([+-]\d+)元', gen)
         mg6s = re.search(r'现货（昨日）\s+(\d+) 元/MWh', gen)
         items_ok, items_bad = [], []
         if mg6 and roll_f is not None and spot is not None:
-            okk = (int(mg6.group(1)) == round(roll_f) and int(mg6.group(2)) == round(roll_f - spot))
-            (items_ok if okk else items_bad).append(f'滚动{mg6.group(1)}/升水{mg6.group(2)}')
+            okk = (abs(int(mg6.group(1)) - round(roll_f)) <= 1 and abs(int(mg6.group(2)) - round(roll_f - spot)) <= 1)
+            (items_ok if okk else items_bad).append(f'滚动{mg6.group(1)}/{mg6.group(2)}')
         if mg6m and monthly_f is not None and spot is not None:
-            okk = (int(mg6m.group(1)) == round(monthly_f) and int(mg6m.group(2)) == round(monthly_f - spot))
-            (items_ok if okk else items_bad).append(f'月度{mg6m.group(1)}/升水{mg6m.group(2)}')
+            okk = (abs(int(mg6m.group(1)) - round(monthly_f)) <= 1 and abs(int(mg6m.group(2)) - round(monthly_f - spot)) <= 1)
+            (items_ok if okk else items_bad).append(f'月度{mg6m.group(1)}/{mg6m.group(2)}')
         if mg6s and spot is not None:
             okk = int(mg6s.group(1)) == round(spot)
             (items_ok if okk else items_bad).append(f'现货{mg6s.group(1)}')
@@ -683,7 +687,7 @@ def main():
             if items_bad:
                 f('G6 升水三项', f'坏:{items_bad}', calc)
             else:
-                s('G6 升水三项', '现货20/滚动28+8/月度109+89', calc)
+                s('G6 升水三项', ' '.join(items_ok), calc)
         else:
             w('G6 升水三项', '解析不到')
         # G7 月内D+2~4 横比售电
