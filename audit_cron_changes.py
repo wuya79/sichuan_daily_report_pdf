@@ -6,6 +6,7 @@ v2(2026-08-20): +退出码汇总(可CI) +镜像权限一致性 +.gitignore例外
 v3(2026-09-10): 镜像对清单纳入 v2_trade_crosscheck.py
 v4(2026-09-11): 镜像对清单纳入 v2_fusion_prefetch.py(双源融合组件)
 v5(2026-09-11): 镜像对+语法清单纳入 v2_zip_autofetch.py(zip自动拉取); §13预留键豁免(rule_timeline)
+v6(2026-10-09): 镜像对/跟踪/语法/敏感清单纳入 sichuan_reservoir_preheat.py(07:30水情预热)
 用法: python3 audit_cron_changes.py [--since YYYY-MM-DD]
 退出码: 0=全部OK; 1=存在FAIL/DIFF/MISS/ALERT/HIT(可挂cron自动告警)
 """
@@ -103,6 +104,7 @@ pairs = [
     (SC/'sichuan_daily_report.sh', SH/'scripts/sichuan_daily_report.sh'),
     (SC/'pdf_report_generator.py', SH/'scripts/pdf_report_generator.py'),
     (SC/'key_loader.py', SH/'scripts/key_loader.py'),
+    (SC/'sichuan_reservoir_preheat.py', SH/'scripts/sichuan_reservoir_preheat.py'),
 ]
 for src, dst in pairs:
     if not src.exists() or not dst.exists():
@@ -120,8 +122,9 @@ for src, dst in pairs:
     print(f'{status} {dst.name}')
 
 sec('4. .gitignore例外实测(git check-ignore)')
-# 3个生产脚本必须不被忽略; 一次性脚本必须被忽略
-must_track = [SH/'scripts/sichuan_daily_report.sh', SH/'scripts/pdf_report_generator.py', SH/'scripts/key_loader.py']
+# 4个生产脚本必须不被忽略; 一次性脚本必须被忽略
+must_track = [SH/'scripts/sichuan_daily_report.sh', SH/'scripts/pdf_report_generator.py', SH/'scripts/key_loader.py',
+              SH/'scripts/sichuan_reservoir_preheat.py']
 must_ignore = [SH/'scripts/some_one_off_analysis.py', SH/'scripts/cq_monthly/new_file.py']
 for f in must_track:
     r = sh(f'git check-ignore "{f}"', cwd=SH)
@@ -147,7 +150,8 @@ pys = [SC/'api_push.py', SC/'key_loader.py', SC/'pdf_report_generator.py',
        SC/'morning_report_watchdog.py', V2/'v2_daily.py', V2/'retrain.py',
        V2/'v2_health_report.py', NEWS/'fetch_morning.py', NEWS/'fetch_afternoon.py',
        NEWS/'lib/formatter.py', GS/'gen_txt.py', GS/'gen_side_ds_pdf.py',
-       SH/'scripts/cq_monthly/daily_signal.py', SC/'audit_daily_values.py']
+       SH/'scripts/cq_monthly/daily_signal.py', SC/'audit_daily_values.py',
+       SC/'sichuan_reservoir_preheat.py']
 for f in pys:
     if not f.exists():
         continue
@@ -189,7 +193,8 @@ if not bad_pipes:
 
 sec('7. 入库文件敏感信息扫描')
 new_files = [V2/'cron', V2/'scripts/api_push.py', SH/'scripts/key_loader.py',
-             SH/'scripts/pdf_report_generator.py', SH/'scripts/sichuan_daily_report.sh']
+             SH/'scripts/pdf_report_generator.py', SH/'scripts/sichuan_daily_report.sh',
+             SH/'scripts/sichuan_reservoir_preheat.py']
 pat = r'sk-[A-Za-z0-9]{20,}|api[_-]?key\s*[:=]\s*["\x27][A-Za-z0-9]{16,}|token\s*[:=]\s*["\x27][A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)'
 for f in new_files:
     r = sh(f"grep -rnE '{pat}' '{f}' 2>/dev/null")

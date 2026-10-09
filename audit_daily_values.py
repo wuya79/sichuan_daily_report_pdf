@@ -8,6 +8,8 @@ v1 (2026-09-23): 由来=当日两日报数值终审的53项固化为每日自动
                  独立重算, 与报告"显示值"逐项比对。不核上游源数据自身正确性。
 v1.1 (2026-09-23): +H组PDF层抽查(存在/新鲜/关键值锚点) + 历史模式FAIL自动降级
                    + 适配gen"瀑布沟"站名修复后的蓄水行格式
+v1.3 (2026-10-09): +I组水情链新鲜度(防静默断供); G4a对齐展示截断口径(满库>100%不再误报);
+                   G4b/G4c适配占比>100%省略项/蓄放水措辞/水位微变
 
 用法: python3 audit_daily_values.py [--date YYYY-MM-DD]     # 默认今天
 退出码: 0=无❌(可含⚠️); 1=存在❌数值不一致或产物缺失
@@ -599,43 +601,64 @@ def main():
             except Exception:
                 cache_by, prev = {}, None
             # G4a 瀑布沟 水位+占比(2.1节行)
+            # 2026-10-09: 展示端"占调节库容"为≤100%截断口径(daily_report.py L1321, 2026-06起),
+            # 重算必须同口径取 min(...,100), 否则满库(原始>100%)时误报 ❌
             mb = re.search(r'瀑布沟\([^)）]+\)\s*水位([\d.]+)[^\n]*?占调节库容(\d+)%', gen)
             bf = (cache_by or {}).get('瀑布沟')
             if mb and bf and '瀑布沟' in rhist_meta:
                 lvl = float(bf.get('库水位')); cap = float(rhist_meta['瀑布沟']['reg_cap'])
                 xsl = float(bf.get('蓄水量', 0))
-                calc_lvl = f'{lvl:.1f}'; calc_cap = round(xsl / (cap * 100) * 100)
+                calc_lvl = f'{lvl:.1f}'
+                calc_cap_raw = round(xsl / (cap * 100) * 100)
+                calc_cap = min(calc_cap_raw, 100)
+                _note = f'原始{calc_cap_raw}%(>100%)，展示按截断口径比对' if calc_cap_raw > 100 else ''
                 if calc_lvl == mb.group(1) and str(calc_cap) == mb.group(2):
-                    s('G4a 瀑布沟(水位/库容)', f'{mb.group(1)}m / {mb.group(2)}%', f'{calc_lvl}m / {calc_cap}%')
+                    s('G4a 瀑布沟(水位/库容)', f'{mb.group(1)}m / {mb.group(2)}%', f'{calc_lvl}m / {calc_cap}%', _note)
                 else:
-                    f('G4a 瀑布沟(水位/库容)', f'{mb.group(1)}m / {mb.group(2)}%', f'{calc_lvl}m / {calc_cap}%')
+                    f('G4a 瀑布沟(水位/库容)', f'{mb.group(1)}m / {mb.group(2)}%', f'{calc_lvl}m / {calc_cap}%', _note)
             else:
                 w('G4a 瀑布沟', '解析不到或缓存缺站')
             # G4b 瀑布沟 蓄水行(delta) — 2026-09-23起gen已修复站名, 按带名格式匹配
-            mbs = re.search(r'^瀑布沟\s+→ 蓄水 \+([\d.]+)万m³ 占调节库容(\d+)% 水位([+-][\d.]+)m', gen, re.M)
+            # 2026-10-09 正则适配: ①占比>100%时"占调节库容"被展示端省略→改可选组;
+            #                    ②状态含"蓄水/放水"两种措辞; ③水位无变化时展示"水位微变"
+            mbs = re.search(r'^瀑布沟\s+→\s*[蓄放]水(?:\(入[<>]出\))?\s+\+([\d.]+)万m³\s*(?:占调节库容(\d+)%)?\s*水位(([+-][\d.]+)m|微变)', gen, re.M)
             if mbs and bf and prev and '瀑布沟' in prev:
                 pv = prev['瀑布沟']
                 d_xsl = float(bf['蓄水量']) - float(pv['蓄水量'])
                 d_lvl = float(bf['库水位']) - float(pv['库水位'])
-                if abs(d_xsl - float(mbs.group(1))) < 0.005 and abs(d_lvl - float(mbs.group(3))) < 0.005:
-                    s('G4b 瀑布沟蓄水行', f'+{mbs.group(1)}万m³ / {mbs.group(3)}m', f'{d_xsl:+.2f} / {d_lvl:+.2f}')
+                if mbs.group(3) == '微变':
+                    _lvl_ok, _lvl_disp = abs(d_lvl) < 0.01, '微变'
                 else:
-                    f('G4b 瀑布沟蓄水行', f'+{mbs.group(1)}万m³ / {mbs.group(3)}m', f'{d_xsl:+.2f} / {d_lvl:+.2f}')
+                    _lvl_ok, _lvl_disp = abs(d_lvl - float(mbs.group(4))) < 0.005, mbs.group(4)
+                if abs(d_xsl - float(mbs.group(1))) < 0.005 and _lvl_ok:
+                    s('G4b 瀑布沟蓄水行', f'+{mbs.group(1)}万m³ / 水位{_lvl_disp}', f'{d_xsl:+.2f} / {d_lvl:+.2f}')
+                else:
+                    f('G4b 瀑布沟蓄水行', f'+{mbs.group(1)}万m³ / 水位{_lvl_disp}', f'{d_xsl:+.2f} / {d_lvl:+.2f}')
             else:
                 w('G4b 瀑布沟蓄水行', '解析不到或缺上日值')
-            # G4c 紫坪铺
-            mzp = re.search(r'紫坪铺\s+→ 蓄水 \+([\d.]+)万m³ 占调节库容(\d+)% 水位([+-][\d.]+)m', gen)
+            # G4c 紫坪铺 — 2026-10-09 同 G4b 适配（占比>100%省略项/蓄放水措辞/水位微变）
+            mzp = re.search(r'紫坪铺\s+→\s*[蓄放]水(?:\(入[<>]出\))?\s+\+([\d.]+)万m³\s*(?:占调节库容(\d+)%)?\s*水位(([+-][\d.]+)m|微变)', gen)
             zp = (cache_by or {}).get('紫坪铺')
             if mzp and zp and prev and '紫坪铺' in prev and '紫坪铺' in rhist_meta:
                 pv = prev['紫坪铺']
                 d_xsl = float(zp['蓄水量']) - float(pv['蓄水量'])
                 d_lvl = float(zp['库水位']) - float(pv['库水位'])
                 cap = float(rhist_meta['紫坪铺']['reg_cap'])
-                calc_cap = round(float(zp['蓄水量']) / (cap * 100) * 100)
-                okk = (abs(d_xsl - float(mzp.group(1))) < 0.005 and str(calc_cap) == mzp.group(2)
-                       and abs(d_lvl - float(mzp.group(3))) < 0.005)
+                calc_cap = min(round(float(zp['蓄水量']) / (cap * 100) * 100), 100)
+                if mzp.group(2) is not None:
+                    _cap_ok = (str(calc_cap) == mzp.group(2))
+                else:
+                    _cap_ok = True  # 占比>100%被展示端省略(2026-10起)
+                if mzp.group(3) == '微变':
+                    _lvl_ok, _lvl_disp = abs(d_lvl) < 0.01, '微变'
+                else:
+                    _lvl_ok, _lvl_disp = abs(d_lvl - float(mzp.group(4))) < 0.005, mzp.group(4)
+                okk = (abs(d_xsl - float(mzp.group(1))) < 0.005 and _cap_ok and _lvl_ok)
                 calc = f'+{d_xsl:.2f}/{calc_cap}%/{d_lvl:+.2f}'
-                disp = f'+{mzp.group(1)}/{mzp.group(2)}%/{mzp.group(3)}'
+                if mzp.group(2) is not None:
+                    disp = f'+{mzp.group(1)}/{mzp.group(2)}%/{mzp.group(3)}'
+                else:
+                    disp = f'+{mzp.group(1)}/[占比>100%省略]/{mzp.group(3)}'
                 (s if okk else f)('G4c 紫坪铺', disp, calc)
             else:
                 w('G4c 紫坪铺', '解析不到或缺上日值')
@@ -893,6 +916,36 @@ def main():
             w(tag, f'疑似抽取缺漏: {miss[0]}', f'命中 {len(anchors)-1}/{len(anchors)}')
         else:
             f(tag, f'缺{len(miss)}项: {miss[:5]}', f'命中 {len(anchors)-len(miss)}/{len(anchors)}')
+
+    # ════════ I 水情链新鲜度（2026-10-09 断供事故后新增，防再次静默） ════════
+    sec('I 水情链新鲜度')
+    if resv is not None:
+        try:
+            _ages, _src_mix = [], {}
+            for _r in resv:
+                _src_mix[_r.get('来源', '?')] = _src_mix.get(_r.get('来源', '?'), 0) + 1
+                _ts = str(_r.get('时间', ''))[:10]
+                if _ts:
+                    try:
+                        _ages.append((dt - _date.fromisoformat(_ts)).days)
+                    except Exception:
+                        pass
+            if _ages:
+                _na = min(_ages)
+                _f3 = sum(1 for a in _ages if a <= 3)
+                _disp = f'最新D-{_na} | ≤3天{_f3}/{len(_ages)}站 | 来源{dict(sorted(_src_mix.items()))}'
+                if _na <= 1 and _f3 >= len(_ages) * 0.5:
+                    s('I 水情新鲜度', _disp, '阈值: 最新≤D-1 且 ≥半数站≤3天')
+                elif _na <= 2 and _f3 >= len(_ages) * 0.25:
+                    w('I 水情新鲜度', _disp, '降级预警: 最新D-2 或 新鲜站不足半数')
+                else:
+                    f('I 水情新鲜度', _disp, f'断供: 最新D-{_na} 或 新鲜站<1/4 — 日报水情块可能回退旧值!')
+            else:
+                w('I 水情新鲜度', '缓存无站级时间戳')
+        except Exception as e:
+            w('I 水情新鲜度', f'重算异常: {type(e).__name__} {e}')
+    else:
+        w('I 水情新鲜度', '水情缓存不可用')
 
     # 历史日期模式: ❌统一降级为⚠️(源数据为当前态, 非点位快照)
     if not is_today:
