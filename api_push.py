@@ -90,7 +90,18 @@ for i, p in enumerate(changed):
 # 以本地tree为唯一真相源（squash语义）：本地已删除的文件也从远程移除
 entries = [{"path": p, "mode": m, "type": "blob", "sha": s}
            for p, (s, m) in local.items()]
-new_tree = api("POST", "git/trees", {"tree": entries})["sha"]
+# 2026-10-11修复: 分块链式建树 — 大仓库全量entries单次POST必422超时(实测v2仓库),
+# 参照v2_data_backup.py同款修复: 每批300条(~45KB)链式base_tree累积; 语义不变
+new_tree = None
+CHUNK = 300
+for _i in range(0, len(entries), CHUNK):
+    _batch = entries[_i:_i + CHUNK]
+    if new_tree is None:
+        new_tree = api("POST", "git/trees", {"tree": _batch}, tries=5)["sha"]
+    else:
+        new_tree = api("POST", "git/trees",
+                       {"base_tree": new_tree, "tree": _batch}, tries=5)["sha"]
+    print(f"  建树 {min(_i + CHUNK, len(entries))}/{len(entries)}")
 print(f"  tree={new_tree[:8]}")
 
 an = sh("git log --format=%an -1 HEAD")
