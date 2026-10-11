@@ -60,6 +60,8 @@ DIRS = {
     "/home/ubuntu/v2_cq_strategy/output/archive": "v2/archive",
     "/home/ubuntu/v2_cq_strategy/output/replay_inputs": "v2/replay_inputs",
     "/home/ubuntu/v2_cq_strategy/output/replay_rebuilt": "v2/replay_rebuilt",
+    # 2026-10-11 补覆盖(审计P1): 特征表每日快照(生产等价回测基建, 历史不可重建)
+    "/home/ubuntu/v2_cq_strategy/data/snapshots": "v2/snapshots",
 }
 RSYNC_EXCLUDES = ["--exclude=.git/", "--exclude=*.lock", "--exclude=__pycache__/",
                   "--exclude=*.pyc", "--exclude=cache/", "--exclude=*.png",

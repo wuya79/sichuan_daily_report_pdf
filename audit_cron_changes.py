@@ -7,6 +7,7 @@ v3(2026-09-10): 镜像对清单纳入 v2_trade_crosscheck.py
 v4(2026-09-11): 镜像对清单纳入 v2_fusion_prefetch.py(双源融合组件)
 v5(2026-09-11): 镜像对+语法清单纳入 v2_zip_autofetch.py(zip自动拉取); §13预留键豁免(rule_timeline)
 v6(2026-10-09): 镜像对/跟踪/语法/敏感清单纳入 sichuan_reservoir_preheat.py(07:30水情预热)
+v7(2026-10-11): 镜像对/语法清单纳入 snapshot_features.sh(09:45特征表快照)
 用法: python3 audit_cron_changes.py [--since YYYY-MM-DD]
 退出码: 0=全部OK; 1=存在FAIL/DIFF/MISS/ALERT/HIT(可挂cron自动告警)
 """
@@ -105,6 +106,7 @@ pairs = [
     (SC/'pdf_report_generator.py', SH/'scripts/pdf_report_generator.py'),
     (SC/'key_loader.py', SH/'scripts/key_loader.py'),
     (SC/'sichuan_reservoir_preheat.py', SH/'scripts/sichuan_reservoir_preheat.py'),
+    (SC/'snapshot_features.sh', V2/'cron/snapshot_features.sh'),
 ]
 for src, dst in pairs:
     if not src.exists() or not dst.exists():
@@ -138,7 +140,7 @@ for f in must_ignore:
     print(('OK  ' if r.returncode == 0 else 'FAIL') + f' 应忽略: {f.name}')
 
 sec('5. 语法/编译检查')
-shs = ['v2_daily.sh', 'v2_retrain.sh', 'v2_retrain_25d.sh', 'v2_health_report.sh', 'sichuan_daily_report.sh']
+shs = ['v2_daily.sh', 'v2_retrain.sh', 'v2_retrain_25d.sh', 'v2_health_report.sh', 'sichuan_daily_report.sh', 'snapshot_features.sh']
 for f in shs:
     r = sh(f'bash -n "{SC/f}"')
     if r.returncode != 0:
