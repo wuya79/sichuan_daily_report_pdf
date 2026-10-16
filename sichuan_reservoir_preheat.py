@@ -244,8 +244,18 @@ def main():
         print(f'  侧档: {dump_path}' + ('  [dry-run 未写缓存]' if args.dry_run else f'  备份: {CACHE}.bak_*'))
     elif degraded:
         # cron 模式（零参数直跑）：健康时零输出；降级时输出一行告警
+        # 2026-10-16：降级时顺带探测备用接口，把"两源是否全断"说清楚，免得每天猜
+        _fb_note = ''
+        if newest_age >= 2 or len(failed) >= 8:
+            try:
+                import requests as _rq
+                _r = _rq.get(sh.FALLBACK_STATIONS_URL, timeout=3)
+                if _r.status_code != 200 or not _r.json():
+                    _fb_note = '；备用接口(47.109.196.221:8088)亦不通'
+            except Exception:
+                _fb_note = '；备用接口(47.109.196.221:8088)亦不通'
         print(f'⚠️ 水情预热 {now_s}: ' + '；'.join(degraded)
-              + f'（更新{len(updated)}/无变化{len(unchanged)}/失败{len(failed)}）')
+              + f'（更新{len(updated)}/无变化{len(unchanged)}/失败{len(failed)}）' + _fb_note)
     return 0
 
 
