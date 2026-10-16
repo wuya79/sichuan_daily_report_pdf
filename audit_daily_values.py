@@ -405,7 +405,11 @@ def main():
                         current_inflow=rD.get('inflow_idx'),
                         current_factors_full={k: rD.get(k) for k in
                             ['hydro_ratio', 'inflow_idx', 'thermal_util', 're_deviation', 'load_deviation', 'temp_anomaly']})
-                    okk = (abs(bt['avg_price_change'] - float(m82.group(3))) < 0.05 and
+                    # 2026-10-16 修复：bt 返回带符号值、显示为"↑/↓+无符号数"，改为"幅度+方向"分开比对（含 0 值边界）
+                    _bt_avg = float(bt['avg_price_change'])
+                    _ok_mag = abs(abs(_bt_avg) - float(m82.group(3))) < 0.05
+                    _ok_dir = (abs(_bt_avg) < 0.05) or ((_bt_avg < 0) == (m82.group(2) == '↓'))
+                    okk = (_ok_mag and _ok_dir and
                            abs(bt['win_rate'] - float(m82.group(4))) < 0.05 and
                            bt['history_count'] == int(m82.group(5)) and len(bt['similar_dates']) == int(m82.group(1)))
                     disp = f'{m82.group(1)}日 | {m82.group(2)}{m82.group(3)}% | {m82.group(4)}% | {m82.group(5)}条'

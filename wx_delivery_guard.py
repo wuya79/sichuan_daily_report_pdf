@@ -160,7 +160,8 @@ def main() -> int:
         else:
             since = time.time() - 86400
     else:
-        since = st.get("last_ts", 0.0) or (time.time() - 300)
+        # 2026-10-16 修复：扫描窗回溯重叠 300s——防"resp 被上一轮消费、fail 落下一轮"的跨轮漏检（补发去重靠 handled 键，跨轮稳定）
+        since = (st.get("last_ts", 0.0) or (time.time() - 300)) - 300
 
     events = scan_events(since)
     max_ts = max((e["ts"] for e in events), default=since)
