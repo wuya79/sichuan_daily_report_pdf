@@ -9,7 +9,8 @@
 - 另：生产 fetch_one 用 PAGESIZE=3 只读到窗口起点（昨天02:00），天生滞后 ~31h。
 
 本脚本职责（cron 07:30 低峰运行 + 手动追赶共用）：
-1) 全量拉取 48 站，每站最多 4 次尝试（平台单次成功率≈50%，双峰分布 0.1~0.2s / 10s+ 超时）；
+1) 主源 raydon（2026-11-03 接入）：一次取全 48 站，实测 ≈0.3s；raydon 失败或不足 40 站时
+   回落省平台逐站（每站最多 4 次尝试，平台单次成功率≈50%，双峰分布 0.1~0.2s / 10s+ 超时）；
 2) 窗口 [D-4, D]，PAGESIZE=500（即使15分钟采样也不截尾），取 max(sj) 的真正最新记录；
 3) 与现有缓存逐站合并：只在新记录时间戳 > 缓存时间戳时更新（绝不倒退），失败站保留原值；
 4) 先 .bak_时间戳 备份，再原子写回缓存；原始记录落 /tmp 侧文件供对账/历史回填复用；
@@ -87,13 +88,33 @@ def main():
     if args.probe:
         entries = entries[:args.probe]
 
-    # ── 全量取数（8线程 + 每站4次尝试）──
+    # ── 第零步：raydon 主源（2026-11-03 接入：一次取全 48 站，实测 0.3s）──
+    # 省平台/备用口自 10-10 起长期不稳，逐站打省平台在 11-03 实测 48/48 全失败；
+    # raydon 已是日报主链主源（sichuan_hydro_api.get_all_reservoirs_latest 第零步），预热改为同源。
+    # 失败或不足 40 站 → 回落省平台逐站（原逻辑不变）。
     results = {}
-    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        futs = {ex.submit(fetch_station, e): e for e in entries}
-        for fut in as_completed(futs):
-            d, recs, err = fut.result()
-            results[d] = (recs, err)
+    rd_src = {}
+    _probe_names = {e[0] for e in entries}
+    try:
+        _rd = sh.fetch_raydon_latest(days=2)
+    except Exception:
+        _rd = {}
+    if len(_rd) >= 40:
+        for _name, _v in _rd.items():
+            if args.probe and _name not in _probe_names:
+                continue
+            results[_name] = ([{'sj': str(_v.get('时间') or ''),
+                                'ksw': _v.get('库水位'), 'rkll': _v.get('入库流量'),
+                                'ckll': _v.get('出库流量'), 'xsl': _v.get('蓄水量')}], '')
+            rd_src[_name] = _v
+
+    # ── 兜底：省平台逐站（8线程 + 每站4次尝试）──
+    if not rd_src:
+        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            futs = {ex.submit(fetch_station, e): e for e in entries}
+            for fut in as_completed(futs):
+                d, recs, err = fut.result()
+                results[d] = (recs, err)
 
     if args.probe:
         print(f'— probe {len(entries)}站 —')
@@ -162,18 +183,24 @@ def main():
             '出库流量': str(new_rec.get('ckll', '') or '').strip(),
             '蓄水量': str(new_rec.get('xsl', '') or '').strip(),
             '时间': sj_new,
-            '来源': 'main',
+            '来源': 'raydon' if display in rd_src else 'main',
         })
-        # 昨日出库：昨天日期内最后一条非空 ckll
-        ymd = (today - timedelta(days=1)).isoformat()
-        for r in reversed(recs or []):
-            if str(r.get('sj', ''))[:10] == ymd and r.get('ckll') not in (None, '') \
-                    and str(r.get('ckll')).strip():
-                try:
-                    rec_out['昨日出库'] = float(r.get('ckll'))
-                except Exception:
-                    pass
-                break
+        # 昨日出库：raydon 路径直接用其回传值；省平台路径按昨天日期内最后一条非空 ckll
+        if display in rd_src and rd_src[display].get('昨日出库') is not None:
+            try:
+                rec_out['昨日出库'] = float(rd_src[display]['昨日出库'])
+            except Exception:
+                pass
+        else:
+            ymd = (today - timedelta(days=1)).isoformat()
+            for r in reversed(recs or []):
+                if str(r.get('sj', ''))[:10] == ymd and r.get('ckll') not in (None, '') \
+                        and str(r.get('ckll')).strip():
+                    try:
+                        rec_out['昨日出库'] = float(r.get('ckll'))
+                    except Exception:
+                        pass
+                    break
         merged.append(rec_out)
         covered.add(display)
         updated.append(f'{display}({sj_new[5:16]})')
@@ -189,6 +216,12 @@ def main():
     newest_age = (today - date.fromisoformat(newest)).days if newest else 999
     fresh2 = sum(1 for t in ts_list if (today - date.fromisoformat(t)).days <= 2)
     newest_full = max((r.get('时间', '') for r in merged if r.get('时间')), default='')
+    lag_h = None
+    try:
+        lag_h = (datetime.now() - datetime.strptime(newest_full[:19], '%Y-%m-%d %H:%M:%S')).total_seconds() / 3600
+    except Exception:
+        pass
+    _src_tag = 'raydon' if rd_src else '省平台'
 
     # ── 写回（备份 + 原子）──
     if not args.dry_run:
@@ -225,9 +258,11 @@ def main():
             degraded.append(f'⚠️ {len(failed)}/48站取数失败')
         if not updated:
             degraded.append('⚠️ 0站更新（无任何新鲜数据）')
+        if lag_h is not None and lag_h > 8:
+            degraded.append(f'⚠️ 上游最新 {newest_full}（滞后 {lag_h:.1f}h）')
 
     ok_line = (f'✅ 水情预热 {now_s}: 更新{len(updated)}站 | 无变化{len(unchanged)} | '
-               f'失败{len(failed)} | 全链最新 {newest_full}(D-{newest_age}) | '
+               f'失败{len(failed)} | 源 {_src_tag} | 全链最新 {newest_full}(D-{newest_age}) | '
                f'≤2天{fresh2}站 | 耗时{time.time()-t0:.0f}s')
 
     if args.verbose or args.dry_run:
@@ -246,7 +281,7 @@ def main():
         # cron 模式（零参数直跑）：健康时零输出；降级时输出一行告警
         # 2026-10-16：降级时顺带探测备用接口，把"两源是否全断"说清楚，免得每天猜
         _fb_note = ''
-        if newest_age >= 2 or len(failed) >= 8:
+        if not rd_src and (newest_age >= 2 or len(failed) >= 8):
             try:
                 import requests as _rq
                 _r = _rq.get(sh.FALLBACK_STATIONS_URL, timeout=3)
