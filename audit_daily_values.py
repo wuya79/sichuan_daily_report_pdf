@@ -190,17 +190,33 @@ def main():
         else:
             w('B1 总可用', '解析不到(格式变更?)')
         # B1b 分项=源快照取整
+        # 2026-10-29 修复误报：10-26起日报对水电施加偏差修正系数=昨实际/今预测，
+        # 报告里的水电=快照hydro×系数。旧版拿原始快照比 → 每日必报假❌。
+        # 注意：不能用报告显示的"修正系数0.80"（两位小数四舍五入，误差可达50MW），
+        # 必须用价格库昨日实际水电均值 独立重算。
+        _corr = 1.0
+        if ph and D in (snap or {}):
+            _r0 = next((r for r in ph.get('records', []) if r.get('date') == Dm1), None)
+            if _r0:
+                _xs = [x for x in (_r0.get('actual_hydro_96') or []) if isinstance(x, (int, float))]
+                if _xs and snap[D]['hydro'] > 0:
+                    _corr = (sum(_xs) / len(_xs)) / snap[D]['hydro']
+        m_corr = re.search(r'修正系数([\d.]+)', sell)
+        if m_corr and abs(_corr - 1.0) < 1e-9:
+            _corr = float(m_corr.group(1))   # 价格库缺昨日实际时，退回显示值（精度差，仅兜底）
         if parts and snap and D in snap:
-            expect = [round(snap[D]['hydro']), round(snap[D]['re']), round(snap[D]['nim'])]
+            expect = [round(snap[D]['hydro'] * _corr), round(snap[D]['re']), round(snap[D]['nim'])]
             if parts == expect:
-                s('B1b 分项=源取整', f'{parts}', f'{expect}')
+                s('B1b 分项=源取整', f'{parts}', f'{expect}'
+                  + (f' (水电×修正{_corr:.2f})' if _corr != 1.0 else ''))
             else:
-                f('B1b 分项=源取整', f'{parts}', f'{expect}')
+                f('B1b 分项=源取整', f'{parts}', f'{expect}'
+                  + (f' (水电×修正{_corr:.2f})' if _corr != 1.0 else ''))
         elif parts:
             w('B1b 分项源比对', 'fc快照缺当日')
-        # B2 净缺口=浮点差
+        # B2 净缺口=浮点差（同口径：水电含修正系数）
         if gap_disp is not None and snap and D in snap:
-            gapf = snap[D]['load'] - (snap[D]['hydro'] + snap[D]['re'] + snap[D]['nim'])
+            gapf = snap[D]['load'] - (snap[D]['hydro'] * _corr + snap[D]['re'] + snap[D]['nim'])
             if round(gapf) == gap_disp:
                 s('B2 净缺口=浮点差', f'{gap_disp:,}', f'{gapf:,.2f}→{round(gapf):,}')
             else:
@@ -228,11 +244,12 @@ def main():
                 s('B3 摘要净缺口', f'{_i(m4s.group(1)):,}', f'正文{gap_disp:,}')
             else:
                 f('B3 摘要净缺口', f'{_i(m4s.group(1)):,}', f'正文{gap_disp:,}')
-        # B4 水电占比(水情行一位小数 + 摘要整数)
+        # B4 水电占比(水情行一位小数 + 摘要整数；含修正系数，见B1b)
         mw_h = re.search(r'水电([\d,]+)MW\s*\(([\d.]+)%\)', sell)
         if mw_h and snap and D in snap:
-            hp = snap[D]['hydro'] / snap[D]['load'] * 100
-            ok_mw = (_i(mw_h.group(1)) == round(snap[D]['hydro']))
+            _hyd = snap[D]['hydro'] * _corr
+            hp = _hyd / snap[D]['load'] * 100
+            ok_mw = (_i(mw_h.group(1)) == round(_hyd))
             ok_pct = abs(float(mw_h.group(2)) - hp) < 0.05
             s_abs = re.search(r'水电(\d+)%', sell)
             ok_abs = bool(s_abs and int(s_abs.group(1)) == round(hp))
@@ -309,12 +326,54 @@ def main():
 
         # ════════ D 趋势仪表盘 ════════
         sec('D 趋势仪表盘(售电)')
+        # 2026-10-29 修复误报：10-25 起日报回顾面板改用实际值（水电占比=实际水电/实际负荷；
+        # 滚动均价取自 .price_history，daily_trends 该列历史滞后1天）。旧版仍拿 trends 预测值比 → 每日假❌。
+        _ph_act = {}
+        if ph:
+            def _a96(v):
+                xs = [x for x in (v or []) if isinstance(x, (int, float))]
+                return sum(xs) / len(xs) if xs else None
+            for _r in ph.get('records', []):
+                _d = _r.get('date')
+                if not _d:
+                    continue
+                _l = _a96(_r.get('actual_load_96'))
+                _h = _a96(_r.get('actual_hydro_96'))
+                _re = _a96(_r.get('actual_re_96'))
+                if _l and _h:
+                    _ph_act.setdefault('hydro_ratio', {})[_d] = _h / _l * 100
+                if _l:
+                    _ph_act.setdefault('load_avg', {})[_d] = _l
+                if _re:
+                    _ph_act.setdefault('re_avg', {})[_d] = _re
+                if isinstance(_r.get('trade_roll_price'), (int, float)):
+                    _ph_act.setdefault('trade_roll_price', {})[_d] = _r['trade_roll_price']
         m_hdr = re.search(r'趋势仪表盘（(\d{2}-\d{2})~(\d{2}-\d{2}) 近7日）', sell)
+        _win = []
         if m_hdr:
-            if (m_hdr.group(1), m_hdr.group(2)) == exp_hdr:
-                s('D0 窗口头', f'{m_hdr.group(1)}~{m_hdr.group(2)}', f'{exp_hdr[0]}~{exp_hdr[1]}')
+            # 2026-10-29 方案A：报告已改为"表头=数据实际窗口"，审计按表头窗口逐日核对，
+            # 不再各自取"最后7个有值日"（那样表头与数据错位时反而验证不出来）
+            try:
+                _y = dt.year
+                _d1 = datetime.strptime(f'{_y}-{m_hdr.group(1)}', '%Y-%m-%d').date()
+                _d2 = datetime.strptime(f'{_y}-{m_hdr.group(2)}', '%Y-%m-%d').date()
+                if _d2 < _d1:
+                    _d2 = _d2.replace(year=_y + 1)
+                _win = [(_d1 + timedelta(days=i)).isoformat()
+                        for i in range((_d2 - _d1).days + 1)]
+            except Exception:
+                _win = []
+            _exp1 = (dt - timedelta(days=7)).strftime('%m-%d')
+            _exp2 = (dt - timedelta(days=1)).strftime('%m-%d')
+            _late1 = (dt - timedelta(days=8)).strftime('%m-%d')
+            _late2 = (dt - timedelta(days=2)).strftime('%m-%d')
+            if (m_hdr.group(1), m_hdr.group(2)) == (_exp1, _exp2):
+                s('D0 窗口头', f'{m_hdr.group(1)}~{m_hdr.group(2)}', f'{_exp1}~{_exp2}')
+            elif (m_hdr.group(1), m_hdr.group(2)) == (_late1, _late2):
+                w('D0 窗口头', f'{m_hdr.group(1)}~{m_hdr.group(2)} 整体退至D-2',
+                  '昨日实际未回填，报告应已标注"数据截至"')
             else:
-                f('D0 窗口头', f'{m_hdr.group(1)}~{m_hdr.group(2)}', f'{exp_hdr[0]}~{exp_hdr[1]}')
+                f('D0 窗口头', f'{m_hdr.group(1)}~{m_hdr.group(2)}', f'{_exp1}~{_exp2}')
         else:
             w('D0 窗口头', '解析不到')
         row_src = {
@@ -325,23 +384,31 @@ def main():
             '火电开机': ('__thermal__', 'int'),
         }
         for lab, (key, fmt) in row_src.items():
-            m = re.search(r'^  ' + re.escape(lab) + r': ([\d.]+(?:→[\d.]+)*) ([↑↓])(\d+)%', sell, re.M)
+            # 2026-10-29: 10-25起"负荷（预测）/新能源（预测）"标签已改为"负荷/新能源"（改实际口径），
+            # 两种标签都认，否则这两行会被静默跳过（漏审）
+            _pat = re.escape(lab.replace('（预测）', '')) + r'(?:（预测）)?'
+            m = re.search(r'^  ' + _pat + r': ([\d.]+(?:→[\d.]+)*) ([↑↓])(\d+)%', sell, re.M)
             if not m:
                 w(f'D {lab}', '行未解析到')
                 continue
             toks = m.group(1).split('→')
             arrow, pctd = m.group(2), int(m.group(3))
             src = None
-            if key == '__thermal__' and thermal:
-                ks = sorted(k for k in thermal if k <= Dm1)[-7:]
-                vals = [thermal[k].get('running') for k in ks]
-                if all(v is not None for v in vals) and len(vals) == 7:
-                    src = [float(v) for v in vals]
-            elif trends and key in trends:
-                ks = sorted(k for k in trends[key] if k <= Dm1)[-7:]
-                src = [trends[key][k] for k in ks]
-            if not src or len(src) != 7 or len(toks) != 7:
-                w(f'D {lab}', f'源窗口异常(toks={len(toks)})')
+            if key == '__thermal__':
+                _dict = {k: (v.get('running') if isinstance(v, dict) else None)
+                         for k, v in (thermal or {}).items()}
+            elif key in _ph_act:
+                _dict = _ph_act[key]
+            else:
+                _dict = (trends or {}).get(key, {})
+            if _win and _dict:
+                src = [_dict.get(_d) for _d in _win]
+                if any(v is None for v in src):
+                    w(f'D {lab}', '源缺窗口内日期(表头与数据可能不一致)')
+                    continue
+                src = [float(v) for v in src]
+            if not src or len(src) != len(toks):
+                w(f'D {lab}', f'源窗口异常(toks={len(toks)},src={len(src or [])})')
                 continue
             vbad = []
             for tok, v in zip(toks, src):
@@ -409,12 +476,18 @@ def main():
                     _bt_avg = float(bt['avg_price_change'])
                     _ok_mag = abs(abs(_bt_avg) - float(m82.group(3))) < 0.05
                     _ok_dir = (abs(_bt_avg) < 0.05) or ((_bt_avg < 0) == (m82.group(2) == '↓'))
+                    # 2026-10-29 修复误报：报告09:31生成、审计16:00重算，因子历史当日仍在变动
+                    # （实测 152→151 条），计数差≤2 属数据churn，不是报告错误。
+                    _cnt_disp = int(m82.group(5))
+                    _cnt_now = bt['history_count']
+                    _ok_cnt = abs(_cnt_now - _cnt_disp) <= 2
                     okk = (_ok_mag and _ok_dir and
                            abs(bt['win_rate'] - float(m82.group(4))) < 0.05 and
-                           bt['history_count'] == int(m82.group(5)) and len(bt['similar_dates']) == int(m82.group(1)))
+                           _ok_cnt and len(bt['similar_dates']) == int(m82.group(1)))
                     disp = f'{m82.group(1)}日 | {m82.group(2)}{m82.group(3)}% | {m82.group(4)}% | {m82.group(5)}条'
                     calc = f'{len(bt["similar_dates"])}日 | {bt["avg_price_change"]}% | {bt["win_rate"]}% | {bt["history_count"]}条'
-                    (s if okk else f)('E3 相似日回测', disp, calc)
+                    _note = (f'历史库当日{_cnt_now - _cnt_disp:+d}条(数据churn)' if _cnt_now != _cnt_disp else '')
+                    (s if okk else f)('E3 相似日回测', disp, calc, _note)
             except Exception as e:
                 w('E3 相似日回测', f'重算异常: {type(e).__name__} {e}')
         else:
@@ -789,12 +862,16 @@ def main():
         else:
             w('G11 开机近7日', '解析不到')
         # G12 六板块7行横比
-        gpairs = [('电价', '电价'), ('水电占比', '水电占比'), ('来水指数', '来水指数'),
-                  ('负荷', '负荷（预测）'), ('新能源', '新能源（预测）'), ('滚动均价', '滚动均价'), ('火电开机', '火电开机')]
+        # 2026-10-29 修复误报：10-25起售电面板标签由"负荷（预测）"改为"负荷"（改实际口径），
+        # 旧正则只认带（预测）的标签 → 解析不到被判不一致。改为两种标签都认。
+        _opt = lambda x: re.escape(x) + r'(?:（预测）)?'
+        gpairs = [('电价', _opt('电价')), ('水电占比', _opt('水电占比')), ('来水指数', _opt('来水指数')),
+                  ('负荷', _opt('负荷')), ('新能源', _opt('新能源')), ('滚动均价', _opt('滚动均价')),
+                  ('火电开机', _opt('火电开机'))]
         bads = []
         for gl, sl in gpairs:
             mg = re.search(r'^  ' + re.escape(gl) + r': ([\d.]+(?:→[\d.]+)*) ([↑↓])(\d+)%', gen, re.M)
-            ms = re.search(r'^  ' + re.escape(sl) + r': ([\d.]+(?:→[\d.]+)*) ([↑↓])(\d+)%', sell, re.M) if sell else None
+            ms = re.search(r'^  ' + sl + r': ([\d.]+(?:→[\d.]+)*) ([↑↓])(\d+)%', sell, re.M) if sell else None
             if not mg or not ms or mg.groups() != ms.groups():
                 bads.append(gl)
         if not bads and gpairs:
@@ -809,7 +886,12 @@ def main():
             if (mg13.group(1), mg13.group(2)) == exp_hdr:
                 s('G13 发电窗口头', f'{mg13.group(1)}~{mg13.group(2)}', f'{exp_hdr[0]}~{exp_hdr[1]}')
             else:
-                f('G13 发电窗口头', f'{mg13.group(1)}~{mg13.group(2)}', f'{exp_hdr[0]}~{exp_hdr[1]}')
+                # 2026-11-03: 售电侧显式降级(昨日实际未回填)且窗口终点==数据截止日 → 口径自洽, 判WARN
+                _mcut = re.search(r'实际数据截至\s*(\d{2}-\d{2})', sell or '')
+                if _mcut and mg13.group(2) == _mcut.group(1):
+                    w('G13 发电窗口头', f'{mg13.group(1)}~{mg13.group(2)}(昨日实际未回填,已降级)')
+                else:
+                    f('G13 发电窗口头', f'{mg13.group(1)}~{mg13.group(2)}', f'{exp_hdr[0]}~{exp_hdr[1]}')
         else:
             w('G13 发电窗口头', '解析不到')
         # G14 发电连续交易行

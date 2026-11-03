@@ -27,15 +27,16 @@ def _aggregate_to_hourly(raw):
 
 
 def _is_complete(rec):
-    """24小时da/rt全有值且不全为0才算完整（防partial/全0污染特征）"""
+    """24小时da/rt全有值才完整。全0=真实地板价(2026-11-01用户确认)，允许写入但告警。
+    越限值(不在0-1500)=官方坏行，拒收待人工核实。"""
     for key in ('da', 'rt'):
         arr = rec.get(key) or []
         if len(arr) != 24 or any(v is None for v in arr):
             return False
         if all(v == 0 for v in arr):
-            # 2026-09-02守卫: 不再静默——0元地板价真实存在(2026-08-30实测), 提示人工确认
-            print(f"⚠ {rec.get('date')} {key}全天为0: 疑似数据污染或极端地板价, 跳过写入, 请人工确认")
-            return False
+            # 2026-11-01修订: 用户确认0元是重庆真实出清价(丰水期水电过剩, 连续时段可到0)
+            # 原逻辑"全0拒收"会误杀 2026-06-01 这类真实全天地板价, 改为写入+告警
+            print(f"ℹ {rec.get('date')} {key}全天为0: 按0元地板价写入(2026-11-01口径), 请核对相邻日是否同为低位")
         bad = [(h, round(v, 1)) for h, v in enumerate(arr) if not (0 <= v <= 1500)]
         if bad:
             # 2026-09-12守卫: 重庆限价0-1500；越限值=官方行退化特征(负值28格实证)，拒收待人工核实
