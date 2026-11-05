@@ -216,8 +216,21 @@ def main():
                 print(f"  上传进度 {_done[0]}/{len(changed)} "
                       f"(耗时{_time.time() - _t0:.0f}s)", flush=True)
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        list(ex.map(_up, changed))
+    # 2026-11-05: ~11MB 大文件 8 并发会抢带宽→120s API 超时→整批失败；
+    # 大文件(>5MB)先串行，小文件仍 8 并发
+    def _size(p):
+        return int(subprocess.run(["git", "cat-file", "-s", local[p][0]],
+                                  capture_output=True, cwd=CWD).stdout or 0)
+
+    big = [p for p in changed if _size(p) > 5 * 1024 * 1024]
+    small = [p for p in changed if p not in set(big)]
+    if big:
+        print(f'  大文件 {len(big)} 个走串行(>5MB)', flush=True)
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            list(ex.map(_up, big))
+    if small:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(_up, small))
     print(f"  blob上传完成 {_done[0]}/{len(changed)} "
           f"耗时{_time.time() - _t0:.0f}s", flush=True)
     if _failed:
