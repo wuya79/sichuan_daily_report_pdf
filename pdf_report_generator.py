@@ -586,6 +586,16 @@ def generate_pdf(api_key_open: str, api_key_code: str) -> dict:
         # 1. 拉取报告文本
         log.info("Step 1: 读取日报报告（本地文件）...")
         report_text = DAILY_TXT.read_text(encoding="utf-8")
+        # 2026-11-07：输入闸门——错误页/残缺页直接拦截，绝不生成垃圾PDF
+        #   （2026-11-06 曾读到 157 字符错误页；若无闸门会生成空壳PDF并推送）
+        _bad = [m for m in ("日报生成异常", "生成超时", "Traceback") if m in report_text]
+        if len(report_text) < 2000 or _bad or "━━━ ①" not in report_text:
+            raise RuntimeError(
+                f"输入闸门拦截：日报文本不可用于PDF（{len(report_text)}字符"
+                + (f"；含{','.join(_bad)}" if _bad else "")
+                + ("；缺①板块标题" if "━━━ ①" not in report_text else "")
+                + "）"
+            )
         report_file = job_dir / "daily_report.txt"
         write_file(str(report_file), report_text)
         log.info(f"  读取完成: {len(report_text)}字符")
