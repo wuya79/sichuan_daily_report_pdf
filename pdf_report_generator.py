@@ -27,6 +27,14 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 
+import analysis_guard as ag
+
+SELL_LABELS = {
+    "一": "核心研判", "二": "水情研判", "三": "天气研判", "四": "供给研判",
+    "五": "检修研判", "六": "趋势研判", "七": "偏差研判", "八": "出清研判",
+    "九": "月内交易研判", "十": "策略研判",
+}
+
 # ─── 路径配置 ───────────────────────────────────────────────────
 NGINX_BASE = "http://118.24.77.156:18080/reports"
 NGINX_DIR = "/var/www/reports"
@@ -575,6 +583,8 @@ def generate_pdf(api_key_open: str, api_key_code: str) -> dict:
     report_type = "daily"
     result = {"success": False, "type": report_type, "error": ""}
     job_dir = None
+    analysis_warning = False
+    analysis_detail = ""
 
     try:
         # 0. 创建临时目录
@@ -639,14 +649,37 @@ def generate_pdf(api_key_open: str, api_key_code: str) -> dict:
         write_file(str(html_file), html)
         log.info(f"  Captions移动完成: HTML {len(html)}字符")
 
-        # 3.5 后处理：补写短分析框（不超过200字的补成200-400字）
-        log.info("Step 3.5: 补写短分析框...")
+        # 3.5 后处理：分析框统一守卫（逐框补写 + 终审；200字硬下限）
+        log.info("Step 3.5: 分析框统一守卫...")
         try:
-            html = fix_short_analysis_boxes(html, report_text, api_key_open, api_key_code)
+            def _call_llm_guard(_system, _user):
+                _messages = [{"role": "system", "content": _system},
+                             {"role": "user", "content": _user}]
+                try:
+                    return _do_openai_call(api_key_open, KIMI_BASE_URL_OPEN, KIMI_MODEL_OPEN,
+                                           _messages, temperature=1, max_tokens=2000, timeout=90)
+                except Exception:
+                    return _do_openai_call(api_key_code, KIMI_BASE_URL_CODE, KIMI_MODEL_CODE,
+                                           _messages, temperature=1, max_tokens=2000, timeout=90)
+
+            html, _journal = ag.repair_boxes(
+                html, report_text, _call_llm_guard,
+                side="售电侧", label_map=SELL_LABELS, min_chars=200)
+            for _j in _journal:
+                log.info(f"  分析框: {_j['section']} {_j['before']}→{_j['after']}字 {_j['status']}")
+            _audit = ag.audit(html, min_chars=200)
+            if _audit['empty'] or _audit['short']:
+                if _audit['empty']:
+                    html = ag.strip_empty(html)
+                analysis_warning = True
+                analysis_detail = ag.format_audit(_audit)
+                log.warning(f"  ⚠️ 分析框终审: {analysis_detail}")
             write_file(str(html_file), html)
-            log.info(f"  补写完成: HTML {len(html)}字符")
+            log.info(f"  分析框守卫完成: HTML {len(html)}字符")
         except Exception as e:
-            log.warning(f"  补写失败（跳过，不影响后续）: {e}")
+            analysis_warning = True
+            analysis_detail = f"分析框守卫异常: {e}"
+            log.warning(f"  分析框守卫失败（跳过，不影响后续）: {e}")
 
         # 4. 转PDF
         log.info("Step 4: 转换PDF...")
@@ -685,6 +718,8 @@ def generate_pdf(api_key_open: str, api_key_code: str) -> dict:
             "tables": html.count("<table>"),
             "charts": len(chart_files),
             "integrity_warning": integrity_warning,
+            "analysis_warning": analysis_warning,
+            "analysis_detail": analysis_detail,
         })
 
         # 清理临时job目录
@@ -752,6 +787,8 @@ def main():
         log.info(f"  文件: {result['pdf_path']}")
         log.info(f"  下载: {result['pdf_url']}")
         log.info(f"  表格: {result['tables']}张, 图表: {result['charts']}张")
+        if result.get("analysis_warning"):
+            log.warning(f"⚠️ 分析框仍为空/偏短: {result.get('analysis_detail','')}，请人工复核")
 
         # OSS 上传（下游系统交付通道）
         if result.get("pdf_path") and result.get("date"):
