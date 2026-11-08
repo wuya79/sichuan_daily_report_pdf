@@ -393,7 +393,7 @@ def main():
             # 2026-10-29: 10-25起"负荷（预测）/新能源（预测）"标签已改为"负荷/新能源"（改实际口径），
             # 两种标签都认，否则这两行会被静默跳过（漏审）
             _pat = re.escape(lab.replace('（预测）', '')) + r'(?:（预测）)?'
-            m = re.search(r'^  ' + _pat + r': ([\d.]+(?:→[\d.]+)*) ([↑↓])(\d+)%', sell, re.M)
+            m = re.search(r'^  ' + _pat + r': ([\d.]+(?:→[\d.]+)*) (?:([↑↓])(\d+)%|(持平))', sell, re.M)
             if not m:
                 if lab in ('德宝受入', '省间净受入'):
                     _d0 = (trends or {}).get(key, {})
@@ -408,7 +408,10 @@ def main():
                 w(f'D {lab}', '行未解析到')
                 continue
             toks = m.group(1).split('→')
-            arrow, pctd = m.group(2), int(m.group(3))
+            if m.group(4) == '持平':
+                arrow, pctd = '→', 0
+            else:
+                arrow, pctd = m.group(2), int(m.group(3))
             src = None
             if key == '__thermal__':
                 _dict = {k: (v.get('running') if isinstance(v, dict) else None)
@@ -438,12 +441,19 @@ def main():
             if pct is None:
                 w(f'D {lab}', '首值=0无法算%')
                 continue
-            calc_arrow = '↑' if pct > 0 else '↓'
-            calc_pct = f'{abs(pct):.0f}'
-            if not vbad and calc_arrow == arrow and calc_pct == f'{pctd}':
-                s(f'D {lab}', m.group(1) + f' {arrow}{pctd}%', f'{src[0]:.2f}→{src[-1]:.2f} {calc_arrow}{calc_pct}%')
+            if src[0] == src[-1]:
+                calc_arrow, calc_pct = '→', '0'
             else:
-                f(f'D {lab}', m.group(1) + f' {arrow}{pctd}%', f'{src[0]:.2f}→{src[-1]:.2f} {calc_arrow}{calc_pct}%',
+                calc_arrow = '↑' if pct > 0 else '↓'
+                calc_pct = f'{abs(pct):.0f}'
+            _disp = '持平' if arrow == '→' else f'{arrow}{pctd}%'
+            _calc_disp = '持平' if calc_arrow == '→' else f'{calc_arrow}{calc_pct}%'
+            _flat = (src[0] == src[-1])
+            _ok_chg = (calc_arrow == arrow and calc_pct == f'{pctd}') if not _flat else (pctd == 0 and abs(pct) < 0.5)
+            if not vbad and _ok_chg:
+                s(f'D {lab}', m.group(1) + f' {_disp}', f'{src[0]:.2f}→{src[-1]:.2f} {_calc_disp}')
+            else:
+                f(f'D {lab}', m.group(1) + f' {_disp}', f'{src[0]:.2f}→{src[-1]:.2f} {_calc_disp}',
                   ('值差异: ' + ','.join(vbad[:3])) if vbad else '变化%不符')
 
         # ════════ E 价格与预测 ════════
@@ -895,8 +905,8 @@ def main():
                   ('火电开机', _opt('火电开机'))]
         bads = []
         for gl, sl in gpairs:
-            mg = re.search(r'^  ' + re.escape(gl) + r': ([\d.]+(?:→[\d.]+)*) ([↑↓])(\d+)%', gen, re.M)
-            ms = re.search(r'^  ' + sl + r': ([\d.]+(?:→[\d.]+)*) ([↑↓])(\d+)%', sell, re.M) if sell else None
+            mg = re.search(r'^  ' + re.escape(gl) + r': ([\d.]+(?:→[\d.]+)*) (?:([↑↓])(\d+)%|(持平))', gen, re.M)
+            ms = re.search(r'^  ' + sl + r': ([\d.]+(?:→[\d.]+)*) (?:([↑↓])(\d+)%|(持平))', sell, re.M) if sell else None
             if not mg or not ms or mg.groups() != ms.groups():
                 bads.append(gl)
         if not bads and gpairs:
