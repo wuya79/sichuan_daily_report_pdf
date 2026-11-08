@@ -863,7 +863,7 @@ def main():
         else:
             w('G9 净缺口横比', '解析不到')
         # G10 水电占比横比
-        mg10 = re.search(r'水电占比(\d+)%', gen)
+        mg10 = re.search(r'水电(?:占比|占负荷)(\d+)%', gen)
         ms10 = re.search(r'水电(\d+)%', sell) if sell else None
         if mg10 and ms10:
             if mg10.group(1) == ms10.group(1):
