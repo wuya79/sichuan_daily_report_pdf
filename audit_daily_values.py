@@ -10,6 +10,8 @@ v1.1 (2026-09-23): +H组PDF层抽查(存在/新鲜/关键值锚点) + 历史模�
                    + 适配gen"瀑布沟"站名修复后的蓄水行格式
 v1.3 (2026-10-09): +I组水情链新鲜度(防静默断供); G4a对齐展示截断口径(满库>100%不再误报);
                    G4b/G4c适配占比>100%省略项/蓄放水措辞/水位微变
+v1.4 (2026-11-08): 修9条误报(B5/E4/G4a/G4c/G9正则; 德宝/省间全零行; F5s/G14无成交→N/A);
+                   G4b/G4c按xsl百万m³换算, 补上单位100x漏检
 
 用法: python3 audit_daily_values.py [--date YYYY-MM-DD]     # 默认今天
 退出码: 0=无❌(可含⚠️); 1=存在❌数值不一致或产物缺失
@@ -44,6 +46,10 @@ def s(tag, disp, calc, note=''):
 
 def w(tag, msg, note=''):
     RES.append(('WARN', tag, msg, '', note))
+
+
+def na(tag, msg, note=''):
+    RES.append(('NA', tag, msg, '', note))
 
 
 def f(tag, disp, calc, note=''):
@@ -260,7 +266,7 @@ def main():
         else:
             w('B4 水电%', '水情行未解析到')
         # B5 周预测行
-        m78 = re.search(r'周预测（D\+1-D\+4）：过剩([\d,]+)MW', sell)
+        m78 = re.search(r'周预测（D\+1-D\+4）：(?:过剩|今日净缺口[+-])([\d,]+)MW', sell)
         pairs = re.findall(r'(负荷|水电|光伏[（(]光照时段[）)]|风电)(\d+)→(\d+)([↑↓])(\d+)%', sell)
         if m78 and len(pairs) == 4:
             bad_ = []
@@ -389,6 +395,16 @@ def main():
             _pat = re.escape(lab.replace('（预测）', '')) + r'(?:（预测）)?'
             m = re.search(r'^  ' + _pat + r': ([\d.]+(?:→[\d.]+)*) ([↑↓])(\d+)%', sell, re.M)
             if not m:
+                if lab in ('德宝受入', '省间净受入'):
+                    _d0 = (trends or {}).get(key, {})
+                    try:
+                        _last7 = [v for _k, v in sorted(_d0.items())[-7:]]
+                        _allzero = bool(_last7) and all(abs(float(v or 0)) < 1e-9 for v in _last7)
+                    except Exception:
+                        _allzero = False
+                    if _allzero:
+                        s(f'D {lab}', '全零未展示', '近7日源值全0，展示端省略')
+                        continue
                 w(f'D {lab}', '行未解析到')
                 continue
             toks = m.group(1).split('→')
@@ -493,7 +509,7 @@ def main():
         else:
             w('E3 相似日回测', '解析不到')
         # E4 因子评分
-        m163 = re.search(r'因子评分: (\S+)\(([+\-][\d.]+)\) 多(\d+)/空(\d+)', sell)
+        m163 = re.search(r'因子评分: (\S+)\(([+\-][\d.]+)(?:，强度加权)?\) 多(\d+)/空(\d+)', sell)
         if not HAVE_FE:
             w('E4 因子评分', '因子引擎不可用')
         elif m163:
@@ -511,7 +527,8 @@ def main():
                     sc = fr.get('score', 0)
                     calc = f'{dmap.get(fr.get("direction"), "中性")}({"+" if sc > 0 else ""}{sc}) 多{fr.get("bull_count", 0)}/空{fr.get("bear_count", 0)}'
                     full_calc = f'因子评分: {calc}'
-                    if m163.group(0) == full_calc:
+                    disp = f'{m163.group(1)}({m163.group(2)}) 多{m163.group(3)}/空{m163.group(4)}'
+                    if disp == calc:
                         s('E4 因子评分', m163.group(0), calc)
                     else:
                         f('E4 因子评分', m163.group(0), full_calc)
@@ -604,6 +621,8 @@ def main():
                 f('F5s 连续交易(售电)', disp, calc)
         elif mcont:
             w('F5s 连续交易', '月内档案缺连续')
+        elif not cslots:
+            na('F5s 连续交易', '11月连续未成交', '原始档案无连续记录')
         else:
             w('F5s 连续交易', '解析不到')
 
@@ -680,41 +699,45 @@ def main():
             # G4a 瀑布沟 水位+占比(2.1节行)
             # 2026-10-09: 展示端"占调节库容"为≤100%截断口径(daily_report.py L1321, 2026-06起),
             # 重算必须同口径取 min(...,100), 否则满库(原始>100%)时误报 ❌
-            mb = re.search(r'瀑布沟\([^)）]+\)\s*水位([\d.]+)[^\n]*?占调节库容(\d+)%', gen)
+            mb = re.search(r'瀑布沟\([^)）]+\)\s*水位([\d.]+)[^\n]*?(占调节库容|蓄满率)(\d+)%', gen)
             bf = (cache_by or {}).get('瀑布沟')
             if mb and bf and '瀑布沟' in rhist_meta:
-                lvl = float(bf.get('库水位')); cap = float(rhist_meta['瀑布沟']['reg_cap'])
+                _lbl = mb.group(2)
+                _capkey = 'total_cap' if _lbl == '蓄满率' else 'reg_cap'
+                lvl = float(bf.get('库水位')); cap = float(rhist_meta['瀑布沟'][_capkey])
                 xsl = float(bf.get('蓄水量', 0))
                 calc_lvl = f'{lvl:.1f}'
                 calc_cap_raw = round(xsl / (cap * 100) * 100)
-                calc_cap = min(calc_cap_raw, 100)
-                _note = f'原始{calc_cap_raw}%(>100%)，展示按截断口径比对' if calc_cap_raw > 100 else ''
-                if calc_lvl == mb.group(1) and str(calc_cap) == mb.group(2):
-                    s('G4a 瀑布沟(水位/库容)', f'{mb.group(1)}m / {mb.group(2)}%', f'{calc_lvl}m / {calc_cap}%', _note)
+                calc_cap = calc_cap_raw if _lbl == '蓄满率' else min(calc_cap_raw, 100)
+                _note = f'{_lbl}分母={"总库容" if _lbl == "蓄满率" else "调节库容"}'
+                if calc_lvl == mb.group(1) and str(calc_cap) == mb.group(3):
+                    s('G4a 瀑布沟(水位/库容)', f'{mb.group(1)}m / {mb.group(3)}%', f'{calc_lvl}m / {calc_cap}%', _note)
                 else:
-                    f('G4a 瀑布沟(水位/库容)', f'{mb.group(1)}m / {mb.group(2)}%', f'{calc_lvl}m / {calc_cap}%', _note)
+                    f('G4a 瀑布沟(水位/库容)', f'{mb.group(1)}m / {mb.group(3)}%', f'{calc_lvl}m / {calc_cap}%', _note)
             else:
                 w('G4a 瀑布沟', '解析不到或缓存缺站')
             # G4b 瀑布沟 蓄水行(delta) — 2026-09-23起gen已修复站名, 按带名格式匹配
             # 2026-10-09 正则适配: ①占比>100%时"占调节库容"被展示端省略→改可选组;
             #                    ②状态含"蓄水/放水"两种措辞; ③水位无变化时展示"水位微变"
-            mbs = re.search(r'^瀑布沟\s+→\s*[蓄放]水(?:\(入[<>]出\))?\s+\+([\d.]+)万m³\s*(?:占调节库容(\d+)%)?\s*水位(([+-][\d.]+)m|微变)', gen, re.M)
+            mbs = re.search(r'^瀑布沟\s+→\s*[蓄放]水(?:\(入[<>]出\))?\s+([+-][\d.]+)(万m³|亿m³)\s*(?:占调节库容(\d+)%)?\s*水位(([+-][\d.]+)m|微变)', gen, re.M)
             if mbs and bf and prev and '瀑布沟' in prev:
                 pv = prev['瀑布沟']
                 d_xsl = float(bf['蓄水量']) - float(pv['蓄水量'])
                 d_lvl = float(bf['库水位']) - float(pv['库水位'])
-                if mbs.group(3) == '微变':
+                if mbs.group(4) == '微变':
                     _lvl_ok, _lvl_disp = abs(d_lvl) < 0.01, '微变'
                 else:
-                    _lvl_ok, _lvl_disp = abs(d_lvl - float(mbs.group(4))) < 0.005, mbs.group(4)
-                if abs(d_xsl - float(mbs.group(1))) < 0.005 and _lvl_ok:
-                    s('G4b 瀑布沟蓄水行', f'+{mbs.group(1)}万m³ / 水位{_lvl_disp}', f'{d_xsl:+.2f} / {d_lvl:+.2f}')
+                    _lvl_ok, _lvl_disp = abs(d_lvl - float(mbs.group(5))) < 0.005, mbs.group(5)
+                _du = mbs.group(2); _draw = float(mbs.group(1))
+                _disp_mm = _draw / 100 if _du == '万m³' else _draw * 100
+                if abs(d_xsl - _disp_mm) < 0.005 and _lvl_ok:
+                    s('G4b 瀑布沟蓄水行', f'{mbs.group(1)}{_du} / 水位{_lvl_disp}', f'{d_xsl:+.2f}百万m³ / {d_lvl:+.2f}')
                 else:
-                    f('G4b 瀑布沟蓄水行', f'+{mbs.group(1)}万m³ / 水位{_lvl_disp}', f'{d_xsl:+.2f} / {d_lvl:+.2f}')
+                    f('G4b 瀑布沟蓄水行', f'{mbs.group(1)}{_du} / 水位{_lvl_disp}', f'{d_xsl:+.2f}百万m³ / {d_lvl:+.2f}')
             else:
                 w('G4b 瀑布沟蓄水行', '解析不到或缺上日值')
             # G4c 紫坪铺 — 2026-10-09 同 G4b 适配（占比>100%省略项/蓄放水措辞/水位微变）
-            mzp = re.search(r'紫坪铺\s+→\s*[蓄放]水(?:\(入[<>]出\))?\s+\+([\d.]+)万m³\s*(?:占调节库容(\d+)%)?\s*水位(([+-][\d.]+)m|微变)', gen)
+            mzp = re.search(r'紫坪铺\s+→\s*[蓄放]水(?:\(入[<>]出\))?\s+([+-][\d.]+)(万m³|亿m³)\s*(?:占调节库容(\d+)%)?\s*水位(([+-][\d.]+)m|微变)', gen)
             zp = (cache_by or {}).get('紫坪铺')
             if mzp and zp and prev and '紫坪铺' in prev and '紫坪铺' in rhist_meta:
                 pv = prev['紫坪铺']
@@ -722,20 +745,22 @@ def main():
                 d_lvl = float(zp['库水位']) - float(pv['库水位'])
                 cap = float(rhist_meta['紫坪铺']['reg_cap'])
                 calc_cap = min(round(float(zp['蓄水量']) / (cap * 100) * 100), 100)
-                if mzp.group(2) is not None:
-                    _cap_ok = (str(calc_cap) == mzp.group(2))
+                if mzp.group(3) is not None:
+                    _cap_ok = (str(calc_cap) == mzp.group(3))
                 else:
                     _cap_ok = True  # 占比>100%被展示端省略(2026-10起)
-                if mzp.group(3) == '微变':
+                if mzp.group(4) == '微变':
                     _lvl_ok, _lvl_disp = abs(d_lvl) < 0.01, '微变'
                 else:
-                    _lvl_ok, _lvl_disp = abs(d_lvl - float(mzp.group(4))) < 0.005, mzp.group(4)
-                okk = (abs(d_xsl - float(mzp.group(1))) < 0.005 and _cap_ok and _lvl_ok)
-                calc = f'+{d_xsl:.2f}/{calc_cap}%/{d_lvl:+.2f}'
-                if mzp.group(2) is not None:
-                    disp = f'+{mzp.group(1)}/{mzp.group(2)}%/{mzp.group(3)}'
+                    _lvl_ok, _lvl_disp = abs(d_lvl - float(mzp.group(5))) < 0.005, mzp.group(5)
+                _du = mzp.group(2); _draw = float(mzp.group(1))
+                _disp_mm = _draw / 100 if _du == '万m³' else _draw * 100
+                okk = (abs(d_xsl - _disp_mm) < 0.005 and _cap_ok and _lvl_ok)
+                calc = f'{d_xsl:+.2f}百万m³/{calc_cap}%/{d_lvl:+.2f}'
+                if mzp.group(3) is not None:
+                    disp = f'{mzp.group(1)}{_du}/{mzp.group(3)}%/{mzp.group(4)}'
                 else:
-                    disp = f'+{mzp.group(1)}/[占比>100%省略]/{mzp.group(3)}'
+                    disp = f'{mzp.group(1)}{_du}/[占比>100%省略]/{mzp.group(4)}'
                 (s if okk else f)('G4c 紫坪铺', disp, calc)
             else:
                 w('G4c 紫坪铺', '解析不到或缺上日值')
@@ -827,7 +852,7 @@ def main():
         else:
             w('G8 火电开机', '解析不到')
         # G9 净缺口横比
-        mg9 = re.search(r'净缺口\s*(-?\d+)MW', gen)
+        mg9 = re.search(r'净缺口[：:]?\s*\+?(-?\d+)MW', gen)
         if mg9 and m74:
             if int(mg9.group(1)) == gap_disp:
                 s('G9 净缺口横比', f'{mg9.group(1)}MW', f'售电{0 if gap_disp is None else gap_disp}MW')
@@ -904,6 +929,8 @@ def main():
                 s('G14 发电连续行', f'{mg14.group(1)}/{mg14.group(2)} 均价{mg14.group(3)}', f'档案加权{wavg:.2f}')
             else:
                 f('G14 发电连续行', f'{mg14.group(3)}', f'{round(wavg)}')
+        elif not cslots2:
+            na('G14 发电连续行', '11月连续未成交', '原始档案无连续记录')
         else:
             w('G14 发电连续行', '解析不到')
         # G15 滚动加权均价
@@ -1043,18 +1070,20 @@ def main():
     # ════════ 输出 ════════
     print(f'数值与计算审计 {D}（独立重算，只读）')
     print('数据源: fc快照/趋势库/火电库/价格库/月内档案/水情缓存/因子历史')
-    n_ok = n_w = n_f = 0
+    n_ok = n_w = n_f = n_na = 0
     n_item = 0
     for lv, tag, disp, calc, note in RES:
         if lv == 'SEC':
             print(f'\n[{tag}]')
             continue
         n_item += 1
-        mark = {'OK': '✅', 'WARN': '⚠️', 'FAIL': '❌'}[lv]
+        mark = {'OK': '✅', 'WARN': '⚠️', 'FAIL': '❌', 'NA': '➖'}[lv]
         if lv == 'OK':
             n_ok += 1
         elif lv == 'WARN':
             n_w += 1
+        elif lv == 'NA':
+            n_na += 1
         else:
             n_f += 1
         print(f'{mark} {tag:22s} {disp}')
@@ -1064,12 +1093,15 @@ def main():
             print(f'      ↳ {note}')
     warns = [t for lv, t, *_ in RES if lv == 'WARN']
     fails = [t for lv, t, *_ in RES if lv == 'FAIL']
+    nas = [t for lv, t, *_ in RES if lv == 'NA']
     print()
     if warns:
         print('⚠️清单: ' + '; '.join(warns))
     if fails:
         print('❌清单: ' + '; '.join(fails))
-    print(f'共 {n_item} 项 | ✅{n_ok} ⚠️{n_w} ❌{n_f}')
+    if nas:
+        print('➖N/A: ' + '; '.join(nas))
+    print(f'共 {n_item} 项 | ✅{n_ok} ⚠️{n_w} ❌{n_f}' + (f' | ➖N/A {n_na}' if n_na else ''))
     return 1 if n_f else 0
 
 
