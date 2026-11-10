@@ -1111,7 +1111,14 @@ def main():
         print('❌清单: ' + '; '.join(fails))
     if nas:
         print('➖N/A: ' + '; '.join(nas))
-    print(f'共 {n_item} 项 | ✅{n_ok} ⚠️{n_w} ❌{n_f}' + (f' | ➖N/A {n_na}' if n_na else ''))
+    if n_w == 0 and n_f == 0:
+        print(f'共 {n_item} 项全通过' + (f' | ➖N/A {n_na}' if n_na else ''))
+    else:
+        tail = f'共 {n_item} 项 | ✅{n_ok}'
+        if n_w: tail += f' ⚠️{n_w}'
+        if n_f: tail += f' ❌{n_f}'
+        if n_na: tail += f' | ➖N/A {n_na}'
+        print(tail)
     return 1 if n_f else 0
 
 
