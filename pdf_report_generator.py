@@ -171,14 +171,14 @@ def build_system_prompt():
     template_content = template_file.read_text(encoding='utf-8') if template_file.exists() else ''
 
     section_count = 10
-    table_count = '25+'
+    table_count = '24+'
     section_list = (
         "【日报板块】\n"
         "一、核心指标摘要(1张总表) → 二、水情监测(3张表：流域来水、水库水位、蓄放水) → "
         "三、天气前瞻(2张表：降雨预报、新能源/气温) → 四、供给预测(2张表：出力预测、火电状态) → "
         "五、检修与断面(2张表：检修清单、断面潮流) → 六、趋势仪表盘(1张7日数据表+图表) → "
         "七、昨日偏差分析(1张偏差表) → 八、昨日出清回顾(3张表：日前出清、分时电价、电源出力) → "
-        "九、月内交易(2张表：滚动交易、价格对比) → 十、交易策略建议(4张表：因子评分、报价参考、流动性管理、相似日)"
+        "九、月内交易(2张表：滚动交易、价格对比) → 十、策略信号摘要(1张表：因子评分明细)"
     )
 
     return f"""你是一个专业的四川电力交易报告生成助手。将原始数据转换为格式正式的HTML报告。
@@ -198,6 +198,7 @@ def build_system_prompt():
 6. 图表引用格式：<figure><img src="charts/xxx.png"><figcaption data-label="图X">标题</figcaption></figure>
 7. 所有单元格填入实际数据，禁止留空写"--"
 8. 不使用emoji，不使用CSS counter，使用data-*属性编号
+8b. 第十节只做信号摘要：禁止出现任何建议报价、目标收益率、持仓比例、仓位数字；原文没有的数字一律不得编造
 9. 中文内容
 
 {section_list}
@@ -790,8 +791,8 @@ def main():
         if result.get("analysis_warning"):
             log.warning(f"⚠️ 分析框仍为空/偏短: {result.get('analysis_detail','')}，请人工复核")
 
-        # OSS 上传（下游系统交付通道）
-        if result.get("pdf_path") and result.get("date"):
+        # OSS 上传（下游系统交付通道）；沙盒用 PDFGEN_DISABLE_OSS=1 关闭
+        if result.get("pdf_path") and result.get("date") and os.environ.get("PDFGEN_DISABLE_OSS", "").lower() not in ("1", "true", "yes"):
             oss_key = f"sichuan-daily-report/daily_{result['date']}.pdf"
             oss_result = upload_to_oss(result["pdf_path"], oss_key)
             result["oss_ok"] = oss_result["ok"]
