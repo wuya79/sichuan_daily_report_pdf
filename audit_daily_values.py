@@ -386,7 +386,7 @@ def main():
             '电价': ('avg_price', 'int'), '水电占比': ('hydro_ratio', 'int'),
             '来水指数': ('inflow_idx', '2f'), '负荷（预测）': ('load_avg', 'int'),
             '新能源（预测）': ('re_avg', 'int'), '德宝受入': ('debao_flow', 'int'),
-            '滚动均价': ('trade_roll_price', 'int'), '省间净受入': ('net_import', 'int'),
+            '滚动均价': ('trade_roll_price', 'int'), '省间受入(不含送出)': ('net_import', 'int'),
             '火电开机': ('__thermal__', 'int'),
         }
         for lab, (key, fmt) in row_src.items():
@@ -395,7 +395,7 @@ def main():
             _pat = re.escape(lab.replace('（预测）', '')) + r'(?:（预测）)?'
             m = re.search(r'^  ' + _pat + r': ([\d.]+(?:→[\d.]+)*) (?:([↑↓])(\d+)%|(持平))', sell, re.M)
             if not m:
-                if lab in ('德宝受入', '省间净受入'):
+                if lab in ('德宝受入', '省间受入(不含送出)'):
                     _d0 = (trends or {}).get(key, {})
                     try:
                         _last7 = [v for _k, v in sorted(_d0.items())[-7:]]
