@@ -32,6 +32,24 @@ MATCH_BACK = 240                # 秒：向前找 Sending response 的窗口
 RESEND_MAX_ATTEMPTS = 3
 TAIL_LINES = 12000
 
+# ---- cron 投递失败 → 个人企微兜底（2026-11-16 新增）----
+CRON_JOBS = f"{HOME}/.hermes/cron/jobs.json"
+CRON_OUT_DIR = f"{HOME}/.hermes/cron/output"
+CRON_MAX_AGE = 8 * 3600         # 秒：只看 8 小时内跑过的 job，避免回放陈年失败
+CRON_MAX_CHARS = 3800           # 企微单条上限 4000，留余量
+# 只补业务类 job；技术探针（OSS探测等）不补
+CRON_WHITELIST = {
+    "55e76a6c0f42": "四川水电电价日报",
+    "c9575c5b6af8": "V2策略日报",
+    "6714b3433f9a": "发电侧日报PDF",
+    "21a847f3e6c4": "售电侧日报PDF链接",
+    "09d688a65c23": "新闻早报",
+    "a8bddbae38d2": "新闻午报",
+    "ccbaaeeecbd2": "交易天气简报",
+}
+# 已自行直发个人企微的 job（看门狗），guard 不再重复补
+CRON_SKIP = {"000a49662763"}
+
 
 def log(msg: str) -> None:
     ts = datetime.datetime.now().strftime("%F %T")
@@ -49,11 +67,18 @@ def load_state() -> dict:
             return json.load(open(STATE, encoding="utf-8"))
         except Exception:
             pass
-    return {"last_ts": 0.0, "handled": [], "pending": []}
+    return {"last_ts": 0.0, "handled": [], "pending": [], "cron_handled": []}
 
 
 def save_state(st: dict) -> None:
     st["handled"] = st["handled"][-500:]
+    # cron_handled 可能与看门狗并发写：落盘前与磁盘做并集，避免互相覆盖
+    try:
+        disk = json.load(open(STATE, encoding="utf-8"))
+        merged = list(dict.fromkeys((st.get("cron_handled") or []) + (disk.get("cron_handled") or [])))
+    except Exception:
+        merged = st.get("cron_handled") or []
+    st["cron_handled"] = merged[-500:]
     tmp = STATE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=1)
@@ -127,6 +152,90 @@ def recover_content(fail_ts: float, chars):
     return (c, f"latest:{s}") if c else (None, "empty")
 
 
+def cron_key(job_id: str, run_iso: str) -> str:
+    try:
+        t = datetime.datetime.fromisoformat(run_iso)
+        return f"cron-{job_id}-{t.strftime('%Y%m%d_%H%M%S')}"
+    except Exception:
+        return f"cron-{job_id}-{run_iso[:19]}"
+
+
+def cron_find_content(job_id: str, run_dt: datetime.datetime):
+    """从 cron/output/<job_id>/ 取该次运行的正文，剥掉 job 头部元信息。"""
+    d = os.path.join(CRON_OUT_DIR, job_id)
+    if not os.path.isdir(d):
+        return None, "no-dir"
+    cands = []
+    for fn in os.listdir(d):
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})\.md$", fn)
+        if not m:
+            continue
+        try:
+            ft = datetime.datetime.strptime(
+                f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}", "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+        cands.append((ft, os.path.join(d, fn)))
+    if not cands:
+        return None, "no-files"
+    cands.sort()
+    deadline = run_dt.astimezone().replace(tzinfo=None) + datetime.timedelta(minutes=5)
+    picked = None
+    for ft, path in cands:
+        if ft <= deadline:
+            picked = path
+    if picked is None:
+        picked = cands[-1][1]
+    try:
+        txt = open(picked, encoding="utf-8").read()
+    except Exception:
+        return None, "unreadable"
+    # agent 型 job 的文件里塞了 Prompt（甚至整个 skill），只取 Response 之后
+    if "\n## Response\n" in txt:
+        txt = txt.split("\n## Response\n")[-1]
+    elif "\n---\n" in txt:
+        txt = txt.split("\n---\n", 1)[1]
+    txt = txt.strip()
+    if not txt or txt.lower().startswith("status: silent"):
+        return None, "empty"
+    if len(txt) > CRON_MAX_CHARS:
+        txt = txt[:CRON_MAX_CHARS] + "\n…（正文过长已截断）"
+    return txt, os.path.basename(picked)
+
+
+def scan_cron_failures(st: dict) -> list:
+    """jobs.json 里 last_delivery_error 非空 且 本次运行在 8h 内 → 待补。"""
+    if not os.path.exists(CRON_JOBS):
+        return []
+    try:
+        data = json.load(open(CRON_JOBS, encoding="utf-8"))
+    except Exception:
+        return []
+    jobs = data.get("jobs", []) if isinstance(data, dict) else data
+    handled = set(st.get("cron_handled") or [])
+    out, now = [], time.time()
+    for j in jobs or []:
+        jid = j.get("id")
+        if not jid or jid not in CRON_WHITELIST or jid in CRON_SKIP:
+            continue
+        err, run_iso = j.get("last_delivery_error"), j.get("last_run_at") or ""
+        if not err or not run_iso:
+            continue
+        try:
+            run_dt = datetime.datetime.fromisoformat(run_iso)
+        except Exception:
+            continue
+        if now - run_dt.timestamp() > CRON_MAX_AGE:
+            continue
+        key = cron_key(jid, run_iso)
+        if key in handled:
+            continue
+        out.append({"key": key, "job_id": jid, "label": CRON_WHITELIST[jid],
+                    "run_dt": run_dt, "deliver": str(j.get("deliver") or ""),
+                    "err": str(err)[:100]})
+    return out
+
+
 def load_wecom_env() -> None:
     for line in open(f"{HOME}/.hermes/.env", encoding="utf-8"):
         line = line.strip()
@@ -153,6 +262,7 @@ def wecom_resend(text: str):
 
 def main() -> int:
     dry = "--dry-run" in sys.argv
+    seed = "--seed" in sys.argv      # 只把当前已失败项标记为已处理，不发送（上线首跑用）
     st = load_state()
     if dry:
         if "--since" in sys.argv:
@@ -199,6 +309,36 @@ def main() -> int:
                 log(f"LOSS {item['key']} gave up after {item['attempts']} attempts")
             elif not any(p["key"] == item["key"] for p in st.get("pending", [])):
                 st.setdefault("pending", []).append(item)
+
+    # ---- cron 投递失败 → 个人企微兜底（业务 job 白名单）----
+    for item in scan_cron_failures(st):
+        if seed:
+            st.setdefault("cron_handled", []).append(item["key"])
+            continue
+        content, how = cron_find_content(item["job_id"], item["run_dt"])
+        if not content:
+            log(f"CRON-LOSS {item['key']} content={how}")
+            if not dry:
+                st.setdefault("cron_handled", []).append(item["key"])
+            continue
+        half = "（企微群已有一份，这条只补微信腿）" if "wecom" in item["deliver"] else ""
+        head = (f"⚠️【自动补发】{item['label']} 的微信腿被限流吞了"
+                f"（{item['run_dt'].strftime('%m-%d %H:%M')} 投递失败）{half}，"
+                f"本条由保障网经个人企微补上原文：\n\n")
+        if dry:
+            print(f"WOULD RESEND {item['key']} chars={len(content)} how={how} "
+                  f"preview={content[:60]!r}")
+            continue
+        try:
+            load_wecom_env()
+            res = wecom_resend(head + content)
+        except Exception as e:  # noqa: BLE001
+            res = {"exception": repr(e)}
+        ok = isinstance(res, dict) and res.get("success")
+        log(f"CRON-LOSS {item['key']} chars={len(content)} how={how} "
+            f"resend={'OK' if ok else res}")
+        if ok:
+            st.setdefault("cron_handled", []).append(item["key"])
 
     if not dry:
         st["last_ts"] = max_ts
