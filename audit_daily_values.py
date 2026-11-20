@@ -308,6 +308,7 @@ def main():
         # ════════ C ⑥偏差表 ════════
         sec('C ⑥偏差表(售电)')
         c2disp = None
+        c2exact = None
         for tag, lab in [('C1 负荷', '负荷'), ('C2 水电', '水电'), ('C3 光伏', '光伏'), ('C4 风电', '风电')]:
             m = re.search(re.escape(lab) + r': 实际([\d,]+)MW 预测([\d,]+) 偏差([+-][\d.]+)%', sell)
             if not m:
@@ -321,12 +322,18 @@ def main():
                 f(tag, f'{pc:+.1f}%', f'区间[{lo:+.2f},{hi:+.2f}]% (A={a_} F={f_})')
             if lab == '水电':
                 c2disp = pc
+                c2exact = (a_ - f_) / f_ * 100 if f else None
         m_c5 = re.search(r'水电偏差([+-]?\d+)%', sell)
         if m_c5 and c2disp is not None:
-            if int(m_c5.group(1)) == round(c2disp):
-                s('C5 告警行+43%', f'{m_c5.group(1)}%', f'round({c2disp})= {round(c2disp)}')
+            # 2026-11-20 修复双重取整误报：c2disp 已是 1 位小数(-17.5)，再 round() 会走银行家
+            # 舍入得 -18，而报告用 {hydro_err:+.0f} 直接格式化 -17.464 得 -17。
+            # 改用偏差表原始 MW 重算的精确偏差（与报告同公式），两处都走 round-half-even。
+            _c5_ref = round(c2exact) if c2exact is not None else round(c2disp)
+            _c5_src = f'{c2exact:.2f}' if c2exact is not None else f'{c2disp}'
+            if int(m_c5.group(1)) == _c5_ref:
+                s('C5 告警行', f'{m_c5.group(1)}%', f'round({_c5_src})={_c5_ref}')
             else:
-                f('C5 告警行', f'{m_c5.group(1)}%', f'round({c2disp})={round(c2disp)}')
+                f('C5 告警行', f'{m_c5.group(1)}%', f'round({_c5_src})={_c5_ref}')
         else:
             w('C5 告警行', '解析不到')
 
